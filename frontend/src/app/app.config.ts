@@ -20,6 +20,7 @@ import { provideServiceWorker } from '@angular/service-worker';
 import { provideClientHydration, withEventReplay } from '@angular/platform-browser';
 import { routes } from './app.routes';
 import { authInterceptor } from './core/interceptors/auth.interceptor';
+import { apiRouterInterceptor } from './core/interceptors/api-router.interceptor';
 import { serverApiInterceptor } from './core/interceptors/server-api.interceptor';
 import { pageLoaderInterceptor } from './core/services/page-loader';
 import { AuthService } from './core/auth/auth.service';
@@ -50,6 +51,7 @@ export const appConfig: ApplicationConfig = {
         pageLoaderInterceptor,
         serverApiInterceptor,
         authInterceptor,
+        apiRouterInterceptor,
       ]),
     ),
     // PWA: app-shell caching, update checks and push (production builds only; see ngsw-config.json).
