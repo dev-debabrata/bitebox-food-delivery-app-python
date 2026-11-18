@@ -30,6 +30,8 @@
   <!-- Step 1: choose -->
   <h2 mat-dialog-title>Choose delivery location</h2>
   <mat-dialog-content>
+    <bb-place-search [showEmpty]="true" (picked)="pick($event)" cdkFocusInitial />
+
     @if (geo.supported) {
       <button
         mat-stroked-button
@@ -44,6 +46,17 @@
     }
     @if (locating()) {
       <mat-progress-bar mode="indeterminate" aria-label="Getting your location" />
+    } @else if (detected(); as d) {
+      <!-- What was found when the dialog opened: one tap to use it. -->
+      <button type="button" class="detected" (click)="useGps()">
+        <np-icon name="navigation" class="mat-icon" matButtonIcon />
+        <span>
+          <strong>{{ d.label }}</strong>
+          @if (d.detail) {
+            <small>{{ d.detail }}</small>
+          }
+        </span>
+      </button>
     }
     @if (gpsError()) {
       <div class="bb-alert info" role="status">
@@ -51,14 +64,18 @@
       </div>
     }
 
-    <bb-place-search [showEmpty]="true" (picked)="pick($event)" cdkFocusInitial />
-
     @if (addresses().length) {
       <h3>Saved addresses</h3>
       <ul class="list">
         @for (a of addresses(); track a.id) {
+          @let selected = a.id === selectedAddressId();
           <li>
-            <button type="button" (click)="pickAddress(a)">
+            <button
+              type="button"
+              [class.selected]="selected"
+              [attr.aria-current]="selected ? 'true' : null"
+              (click)="pickAddress(a)"
+            >
               <np-icon [name]="(a.label === 'home' ? 'home' : a.label === 'work' ? 'work' : 'place') | npIcon" class="mat-icon" matButtonIcon />
               <span>
                 <strong>{{

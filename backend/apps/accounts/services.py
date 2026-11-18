@@ -15,13 +15,11 @@ from typing import Any
 
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
-from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
-from django.utils.html import escape
 
-from apps.notifications.senders import sms_enabled
+from apps.notifications import emails
 from apps.rbac.roles import Role
 from apps.uploads.storage import is_uploaded_image_url
 from common.api import ApiError
@@ -105,7 +103,7 @@ def _phone_taken(phone: str, exclude: uuid.UUID | None = None) -> bool:
     return (qs.exclude(pk=exclude) if exclude else qs).exists()
 
 
-def _check_new_account(email: str, phone: str | None) -> None:
+def check_new_account(email: str, phone: str | None) -> None:
     if User.objects.filter(email=email).exists():
         raise ApiError.conflict("An account with this email already exists")
     if phone and _phone_taken(phone):
@@ -113,14 +111,17 @@ def _check_new_account(email: str, phone: str | None) -> None:
 
 
 def signup_needs_code() -> bool:
-    """New accounts confirm their number by SMS first (SIGNUP_OTP_REQUIRED, while SMS is on)."""
-    return bool(settings.SIGNUP_OTP_REQUIRED) and sms_enabled()
+    """New accounts confirm their email with an emailed code first (SIGNUP_OTP_REQUIRED)."""
+    return bool(settings.SIGNUP_OTP_REQUIRED)
 
 
 def request_signup_code(email: str, phone: str, ip: str | None) -> dict[str, Any]:
-    """Step 1 of sign-up: the email and number are free, so text a code to the number."""
-    _check_new_account(email, phone)
-    return otp.send_code(phone, OtpPurpose.REGISTER, ip, True)
+    """Step 1 of sign-up: the email and number are free, so email a code to the address.
+    While codes are off, says so and the client creates the account at once."""
+    check_new_account(email, phone)
+    if not signup_needs_code():
+        return {"codeRequired": False}
+    return {**otp.send_email_code(email, OtpPurpose.REGISTER_EMAIL, ip), "codeRequired": True}
 
 
 def register(data: dict[str, Any], meta: RequestMeta) -> IssuedSession:
@@ -128,30 +129,26 @@ def register(data: dict[str, Any], meta: RequestMeta) -> IssuedSession:
     email, phone = data["email"], data.get("phone") or None
     for check in registration_checks:
         check(data)
-    _check_new_account(email, phone)
-    phone_verified_at = None
+    check_new_account(email, phone)
+    email_verified_at = None
     if signup_needs_code():
-        # Step 2: the account is created only with the code texted to its number.
-        if not phone:
-            raise ApiError.bad_request(
-                "Enter your mobile number",
-                [{"field": "phone", "message": "Enter your mobile number"}],
-            )
+        # Step 2: the account is created only with the code emailed to its address.
         if not data.get("code"):
             raise ApiError.bad_request(
-                "Enter the code we sent to your phone",
+                "Enter the code we sent to your email",
                 [{"field": "code", "message": "Enter the 6-digit code"}],
             )
-        otp.check_code(phone, OtpPurpose.REGISTER, data["code"])
-        phone_verified_at = timezone.now()
+        otp.check_email_code(email, OtpPurpose.REGISTER_EMAIL, data["code"])
+        email_verified_at = timezone.now()
 
     with transaction.atomic():
         user = User.objects.create_user(
             email, data["password"], data["name"], phone=phone, role=role,
-            phone_verified_at=phone_verified_at,
+            email_verified_at=email_verified_at,
         )  # fmt: skip
         session = _issue(user, meta)
-        transaction.on_commit(_safe(lambda u, *_: send_email_verification(u), user))
+        if not email_verified_at:
+            transaction.on_commit(_safe(lambda u, *_: send_email_verification(u), user))
         for hook in registration_hooks:
             transaction.on_commit(_safe(hook, user, data, meta))
     logger.info("User registered", extra={"user_id": str(user.pk), "role": role})
@@ -170,9 +167,19 @@ def _safe(hook: RegistrationHook, *args: Any) -> Callable[[], None]:
     return run
 
 
+# Why a non-active account cannot sign in (403 FORBIDDEN, as for a suspension before).
+BLOCKED_SIGN_IN: dict[str, str] = {
+    UserStatus.INACTIVE: "This account is inactive",
+    UserStatus.SUSPENDED: "This account has been suspended",
+    UserStatus.BLOCKED: "This account is blocked",
+}
+
+
 def _signed_in(user: User, portal: str | None, meta: RequestMeta, *fields: str) -> IssuedSession:
     if user.status != UserStatus.ACTIVE:
-        raise ApiError.forbidden("This account has been suspended")
+        raise ApiError.forbidden(
+            BLOCKED_SIGN_IN.get(user.status, BLOCKED_SIGN_IN[UserStatus.SUSPENDED])
+        )
     # Each panel has its own sign-in page: a customer can't use the admin login, and so on.
     if portal and user.role != portal:
         raise ApiError.forbidden("This account cannot sign in to this portal")
@@ -223,28 +230,50 @@ def send_email_verification(user: User) -> None:
             "updated_at",
         ]
     )
-    link = f"{settings.CLIENT_URLS[0]}/verify-email?token={token}"
-    send_mail(
-        subject="Confirm your BiteBox email",
-        message=(
-            f"Hi {user.name},\n\nConfirm this is your email address for BiteBox:\n\n{link}\n\n"
-            f"The link works for {hours} hours. If you did not create an account, ignore this "
-            "email."
+    emails.send(
+        user.email,
+        emails.Email(
+            subject="Confirm your BiteBox email",
+            title="Confirm your email address",
+            name=user.name,
+            lines=["Tap the button to confirm this is your email address for BiteBox."],
+            action_label="Confirm email",
+            action_url=f"{settings.CLIENT_URLS[0]}/verify-email?token={token}",
+            note=f"The link works for {hours} hours. If you did not create an account, ignore "
+            "this email.",
         ),
-        html_message=(
-            f"<p>Hi {escape(user.name)},</p><p>Confirm this is your email address for BiteBox.</p>"
-            f'<p><a href="{escape(link)}">Confirm email</a></p>'
-            f"<p>The link works for {hours} hours. If you did not create an account, ignore this "
-            "email.</p>"
-        ),
-        from_email=None,
-        recipient_list=[user.email],
     )
 
 
-def resend_email_verification(user: User) -> None:
+def _refuse_verified_email(user: User) -> None:
     if user.email_verified_at:
         raise ApiError.conflict("Your email is already verified")
+
+
+def request_email_code(user: User, ip: str | None) -> dict[str, Any]:
+    """Emails a signed-in person a code that confirms their address (the account page)."""
+    _refuse_verified_email(user)
+    return otp.send_email_code(user.email, OtpPurpose.VERIFY_EMAIL, ip, user.name)
+
+
+def verify_email_code(user: User, code: str) -> User:
+    _refuse_verified_email(user)
+    otp.check_email_code(user.email, OtpPurpose.VERIFY_EMAIL, code)
+    user.email_verified_at = timezone.now()
+    user.email_verification_token_hash = user.email_verification_expires_at = None
+    user.save(
+        update_fields=[
+            "email_verified_at",
+            "email_verification_token_hash",
+            "email_verification_expires_at",
+            "updated_at",
+        ]
+    )
+    return user
+
+
+def resend_email_verification(user: User) -> None:
+    _refuse_verified_email(user)
     send_email_verification(user)
 
 
@@ -276,6 +305,10 @@ def login(data: dict[str, Any], meta: RequestMeta) -> IssuedSession:
     return _signed_in(user, data.get("portal"), meta)
 
 
+def _session_expired() -> ApiError:
+    return ApiError.unauthorized("Session expired, please sign in again")
+
+
 def refresh(raw_token: str | None, meta: RequestMeta) -> IssuedSession:
     if not raw_token:
         raise ApiError.unauthorized("No session")
@@ -293,7 +326,7 @@ def refresh(raw_token: str | None, meta: RequestMeta) -> IssuedSession:
             or session.revoked_reason != RevokedReason.ROTATED
             or session.revoked_at is None
         ):
-            raise ApiError.unauthorized("Session expired, please sign in again")
+            raise _session_expired()
         if now - session.revoked_at >= ROTATION_GRACE:
             # A rotated token came back: it was copied. Revoke the whole family.
             Session.objects.filter(family=session.family, revoked_at__isnull=True).update(
@@ -303,15 +336,13 @@ def refresh(raw_token: str | None, meta: RequestMeta) -> IssuedSession:
                 "Refresh token reuse detected; session family revoked",
                 extra={"user_id": str(session.user_id)},
             )
-            raise ApiError.unauthorized("Session expired, please sign in again")
+            raise _session_expired()
         # Otherwise two tabs refreshed at the same moment: reissue for the same family.
 
-    if session is None:  # unreachable: a rotated row exists
-        raise ApiError.unauthorized("Session expired, please sign in again")
-    user = session.user
-    if user.status != UserStatus.ACTIVE:
-        raise ApiError.unauthorized("Session expired, please sign in again")
-    return _issue(user, meta, session.family)
+    # (session is never None here: a rotated row exists)
+    if session is None or session.user.status != UserStatus.ACTIVE:
+        raise _session_expired()
+    return _issue(session.user, meta, session.family)
 
 
 def logout(raw_token: str | None) -> None:
@@ -325,6 +356,11 @@ def forgot_password(email: str) -> None:
     user = User.objects.filter(email=email, status=UserStatus.ACTIVE).first()
     if user is None:
         return  # same response either way: never reveal which emails exist
+    send_password_reset(user)
+
+
+def send_password_reset(user: User) -> None:
+    """Emails a one-time reset link (PASSWORD_RESET_TTL_MINUTES); forgot-password and support."""
     token = random_token(32)
     minutes = settings.PASSWORD_RESET_TTL_MINUTES
     user.password_reset_token_hash = hash_token(token)
@@ -333,23 +369,29 @@ def forgot_password(email: str) -> None:
         update_fields=["password_reset_token_hash", "password_reset_expires_at", "updated_at"]
     )
 
-    link = f"{settings.CLIENT_URLS[0]}/reset-password?token={token}"
-    send_mail(
-        subject="Reset your BiteBox password",
-        message=(
-            f"Hi {user.name},\n\nUse this link to reset your BiteBox password. It expires in "
-            f"{minutes} minutes and can only be used once:\n\n{link}\n\nIf you did not request "
-            "this, you can ignore this email."
+    emails.send(
+        user.email,
+        emails.Email(
+            subject="Reset your BiteBox password",
+            title="Reset your password",
+            name=user.name,
+            lines=[
+                "We got a request to reset your BiteBox password. Tap the button to choose a "
+                "new one."
+            ],
+            action_label="Reset password",
+            action_url=f"{settings.CLIENT_URLS[0]}/reset-password?token={token}",
+            note=f"The link expires in {minutes} minutes and works once. If you did not ask for "
+            "this, you can ignore this email; your password stays the same.",
         ),
-        html_message=(
-            f"<p>Hi {escape(user.name)},</p><p>Use the link below to reset your BiteBox password. "
-            f"It expires in {minutes} minutes and can only be used once.</p>"
-            f'<p><a href="{escape(link)}">Reset password</a></p>'
-            "<p>If you did not request this, you can ignore this email.</p>"
-        ),
-        from_email=None,
-        recipient_list=[user.email],
     )
+
+
+def _refuse_current_password(user: User, new_password: str, field: str) -> None:
+    """A new password must differ from the one it replaces (reset and change)."""
+    if user.check_password(new_password):
+        message = "Your new password must be different from your current password"
+        raise ApiError.bad_request(message, [{"field": field, "message": message}])
 
 
 def reset_password(token: str, new_password: str) -> None:
@@ -363,6 +405,7 @@ def reset_password(token: str, new_password: str) -> None:
         user = matched.select_for_update().first()
         if user is None:
             raise ApiError.bad_request("This reset link is invalid or has expired")
+        _refuse_current_password(user, new_password, "password")
         matched.update(
             password=password,
             password_reset_token_hash=None,
@@ -376,6 +419,7 @@ def reset_password(token: str, new_password: str) -> None:
 def change_password(user: User, current: str, new: str) -> None:
     if not user.check_password(current):
         raise ApiError.bad_request("Current password is incorrect")
+    _refuse_current_password(user, new, "newPassword")
     user.set_password(new)
     end_sessions(user, RevokedReason.PASSWORD_CHANGE, fields=("password",))
 
@@ -398,6 +442,9 @@ def update_profile(user: User, data: dict[str, Any]) -> User:
             raise ApiError.bad_request("Upload the photo first")
         user.avatar_url = url
         fields.append("avatar_url")
+    if "gender" in data:  # null clears it
+        user.gender = data["gender"] or None
+        fields.append("gender")
     if fields:
         user.save(update_fields=[*fields, "updated_at"])
     return user

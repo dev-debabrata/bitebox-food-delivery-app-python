@@ -4,25 +4,34 @@ refund queue), invoices and statements, and partners' settlement history."""
 from typing import Any
 
 from django.http import HttpResponse
-from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.authentication import current_user
+from apps.accounts.serializers import JoinedListQuery
 from apps.audit.services import audited
 from apps.orders.models import Order
 from apps.orders.notifications import rupees
 from apps.rbac.roles import Permission, Role
 from common.api import ApiError, ok
+from common.filters import (
+    FacetQuery,
+    MultiIdField,
+    facets_page,
+    list_params,
+    multi_choice,
+    multi_param,
+)
 from common.pagination import Page
 from common.permissions import permission_required, role_required
 from common.schema import envelope, errors
-from common.validation import PageQuery, parse_id, validated
+from common.validation import parse_id, validated
 
 from . import invoices, ledger, reports, services
-from .models import Payout, PayoutStatus, PayoutType
+from .models import LedgerAccount, Payout, PayoutStatus, PayoutType
 
 
 class DaysQuery(serializers.Serializer):
@@ -34,6 +43,10 @@ class DaysQuery(serializers.Serializer):
     )
 
 
+def _days(request: Request) -> int:
+    return int(validated(DaysQuery, request.query_params).get("days", 30))
+
+
 class RestaurantEarningsView(APIView):
     permission_classes = [role_required(Role.RESTAURANT)]
 
@@ -43,8 +56,7 @@ class RestaurantEarningsView(APIView):
         responses={200: envelope("Earnings"), **errors(401, 403, 404, 422)},
     )
     def get(self, request: Request) -> Response:
-        days = validated(DaysQuery, request.query_params).get("days", 30)
-        return ok(reports.restaurant_earnings(current_user(request), days))
+        return ok(reports.restaurant_earnings(current_user(request), _days(request)))
 
 
 class AdminReportsView(APIView):
@@ -56,8 +68,7 @@ class AdminReportsView(APIView):
         responses={200: envelope("AdminReport"), **errors(401, 403, 422)},
     )
     def get(self, request: Request) -> Response:
-        days = validated(DaysQuery, request.query_params).get("days", 30)
-        return ok(reports.admin_report(days))
+        return ok(reports.admin_report(_days(request)))
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +79,6 @@ PAYOUTS = [permission_required(Permission.PAYOUTS_MANAGE)]
 PDF = OpenApiResponse(description="PDF document")
 RULES = envelope("CommissionRules")
 PAYOUT = envelope("PayoutResult")
-PAYOUT_LIST = envelope("PayoutList")
 
 
 def pdf_response(result: tuple[str, bytes]) -> HttpResponse:
@@ -79,8 +89,18 @@ def pdf_response(result: tuple[str, bytes]) -> HttpResponse:
     return response
 
 
-def _days(request: Request) -> int:
-    return int(validated(DaysQuery, request.query_params).get("days", 30))
+def _statement_pdf(**scope: Any) -> HttpResponse:
+    payout = Payout.objects.filter(**scope).first()
+    if payout is None:
+        raise ApiError.not_found("Payout not found")
+    return pdf_response(invoices.payout_statement(payout))
+
+
+def _invoice_pdf(**scope: Any) -> HttpResponse:
+    order = Order.objects.filter(**scope).prefetch_related("items").first()
+    if order is None:
+        raise ApiError.not_found("Order not found")
+    return pdf_response(invoices.order_invoice(order))
 
 
 class FinanceDashboardView(APIView):
@@ -117,19 +137,38 @@ class CommissionReportView(APIView):
         return ok(services.commission_report(_days(request)))
 
 
-class RefundQuery(PageQuery):
-    state = serializers.ChoiceField(choices=["needed", "refunded"], required=False)
+class RefundQuery(FacetQuery, JoinedListQuery):
+    """GET /admin/finance/refunds."""
+
+    state = multi_choice(list(services.REFUND_STATES))
+    restaurant = MultiIdField()  # the orders' restaurants
+    day_range = "updated"
+
+
+REFUND_PAGE = facets_page("RefundQueuePage", services.REFUND_FACETS)
 
 
 class RefundQueueView(APIView):
     permission_classes = FINANCE
 
     @extend_schema(
-        tags=["Admin: finance"], parameters=[RefundQuery], responses={200: envelope("RefundQueue")}
+        tags=["Admin: finance"],
+        parameters=list_params(
+            "Order number, or the customer's name, email or phone",
+            multi_param(
+                "state",
+                list(services.REFUND_STATES),
+                "needed: paid online orders cancelled or rejected whose refund failed; "
+                "refunded: refunded fully or partly",
+            ),
+            multi_param("restaurant", description="Restaurant ids (the orders' restaurants)"),
+            days="updated",
+        ),
+        responses={200: REFUND_PAGE, **errors(401, 403, 422)},
     )
     def get(self, request: Request) -> Response:
         query = validated(RefundQuery, request.query_params)
-        return ok(services.refunds(query.get("state"), Page.from_query(query)))
+        return ok(services.refunds(query, Page.from_query(query)))
 
 
 class CommissionRuleInput(serializers.Serializer):
@@ -190,8 +229,8 @@ class CommissionOverrideView(APIView):
         )
 
 
-class PayoutTypeQuery(serializers.Serializer):
-    type = serializers.ChoiceField(
+def _payout_type() -> serializers.ChoiceField:
+    return serializers.ChoiceField(
         choices=PayoutType.values,
         error_messages=dict.fromkeys(
             ("required", "invalid_choice"), "Type must be restaurant or rider"
@@ -199,18 +238,25 @@ class PayoutTypeQuery(serializers.Serializer):
     )
 
 
-class PayoutListQuery(PageQuery):
-    type = serializers.ChoiceField(choices=PayoutType.values, required=False)
-    status = serializers.ChoiceField(choices=PayoutStatus.values, required=False)
+class PayoutTypeQuery(serializers.Serializer):
+    type = _payout_type()
+
+
+class PayoutListQuery(FacetQuery, JoinedListQuery):
+    """GET /admin/finance/payouts."""
+
+    type = multi_choice(PayoutType.values)
+    status = multi_choice(PayoutStatus.values)
+    restaurant = MultiIdField()  # those restaurants' payouts (one: its account page)
+    rider = MultiIdField()  # those riders' payouts (user ids; one: their account page)
+    day_range = "created"
+
+
+PAYOUT_PAGE = facets_page("PayoutPage", services.PAYOUT_FACETS)
 
 
 class CreatePayoutInput(serializers.Serializer):
-    type = serializers.ChoiceField(
-        choices=PayoutType.values,
-        error_messages=dict.fromkeys(
-            ("required", "invalid_choice"), "Type must be restaurant or rider"
-        ),
-    )
+    type = _payout_type()
     payee_id = serializers.UUIDField(
         error_messages=dict.fromkeys(("required", "invalid", "null"), "Choose who to pay")
     )
@@ -249,8 +295,15 @@ class PayoutsView(APIView):
 
     @extend_schema(
         tags=["Admin: finance"],
-        parameters=[PayoutListQuery],
-        responses={200: PAYOUT_LIST},
+        parameters=list_params(
+            "The payee's name or the transfer reference",
+            multi_param("type", PayoutType.values, "The page's payout type"),
+            multi_param("status", PayoutStatus.values),
+            multi_param("restaurant", description="Restaurant ids"),
+            multi_param("rider", description="Riders' user ids (rider payouts only)"),
+            days="created",
+        ),
+        responses={200: PAYOUT_PAGE, **errors(401, 403, 422)},
     )
     def get(self, request: Request) -> Response:
         query = validated(PayoutListQuery, request.query_params)
@@ -331,10 +384,25 @@ class AdminStatementView(APIView):
 
     @extend_schema(tags=["Admin: finance"], responses={200: PDF, **errors(404, 422)})
     def get(self, request: Request, id: str) -> HttpResponse:
-        payout = Payout.objects.filter(pk=parse_id(id)).first()
-        if payout is None:
-            raise ApiError.not_found("Payout not found")
-        return pdf_response(invoices.payout_statement(payout))
+        return _statement_pdf(pk=parse_id(id))
+
+
+class LedgerQuery(FacetQuery, JoinedListQuery):
+    """GET /admin/finance/ledger."""
+
+    account = multi_choice(LedgerAccount.values)
+    event = multi_choice(list(ledger.EVENTS))
+    day_range = "created"
+
+
+LEDGER_PAGE = facets_page(
+    "LedgerPage",
+    ledger.FACETS,
+    days=serializers.IntegerField(),
+    accounts=serializers.ListField(child=serializers.JSONField()),
+    balanced=serializers.BooleanField(),
+    unbalanced_groups=serializers.IntegerField(),
+)
 
 
 class LedgerView(APIView):
@@ -342,12 +410,24 @@ class LedgerView(APIView):
 
     @extend_schema(
         tags=["Admin: finance"],
-        parameters=[DaysQuery, OpenApiParameter("page", int), OpenApiParameter("limit", int)],
-        responses={200: envelope("Ledger")},
+        parameters=[
+            DaysQuery,
+            *list_params(
+                "The entry's description (an order number or a payee)",
+                multi_param("account", LedgerAccount.values),
+                multi_param(
+                    "event",
+                    list(ledger.EVENTS),
+                    "settlement: an order delivered; payout: a payout paid; refund: after delivery",
+                ),
+                days="created",
+            ),
+        ],
+        responses={200: LEDGER_PAGE, **errors(401, 403, 422)},
     )
     def get(self, request: Request) -> Response:
-        page = validated(PageQuery, request.query_params)
-        return ok(ledger.summary(_days(request), Page.from_query(page)))
+        query = validated(LedgerQuery, request.query_params)
+        return ok(ledger.summary(_days(request), Page.from_query(query), query))
 
 
 class SettlementsCsvQuery(serializers.Serializer):
@@ -381,10 +461,7 @@ class AdminOrderInvoiceView(APIView):
 
     @extend_schema(tags=["Admin: finance"], responses={200: PDF, **errors(404, 409, 422)})
     def get(self, request: Request, id: str) -> HttpResponse:
-        order = Order.objects.filter(pk=parse_id(id)).prefetch_related("items").first()
-        if order is None:
-            raise ApiError.not_found("Order not found")
-        return pdf_response(invoices.order_invoice(order))
+        return _invoice_pdf(pk=parse_id(id))
 
 
 # --- customers and partners -------------------------------------------------------------------
@@ -393,14 +470,7 @@ class OrderInvoiceView(APIView):
 
     @extend_schema(tags=["Orders"], responses={200: PDF, **errors(404, 409, 422)})
     def get(self, request: Request, id: str) -> HttpResponse:
-        order = (
-            Order.objects.filter(pk=parse_id(id), customer=current_user(request))
-            .prefetch_related("items")
-            .first()
-        )
-        if order is None:
-            raise ApiError.not_found("Order not found")
-        return pdf_response(invoices.order_invoice(order))
+        return _invoice_pdf(pk=parse_id(id), customer=current_user(request))
 
 
 def _partner_scope(request: Request) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -419,14 +489,41 @@ def _partner_scope(request: Request) -> tuple[str, dict[str, Any], dict[str, Any
 PARTNERS = [role_required(Role.RESTAURANT, Role.DELIVERY)]
 
 
+class MyPayoutQuery(FacetQuery, JoinedListQuery):
+    """GET /my/restaurant/payouts, /delivery/payouts."""
+
+    status = multi_choice(PayoutStatus.values)
+    day_range = "created"
+
+
+class MySettlementQuery(FacetQuery, JoinedListQuery):
+    """GET /my/restaurant/settlements, /delivery/settlements."""
+
+    status = multi_choice(services.SETTLEMENT_STATES)
+    day_range = "settled"
+
+
+MY_PAYOUT_PAGE = facets_page("MyPayoutPage", services.MY_PAYOUT_FACETS)
+SETTLEMENT_PAGE = facets_page(
+    "SettlementHistoryPage", services.settlement_facets(PayoutType.RESTAURANT)
+)
+
+
 class MyPayoutsView(APIView):
     permission_classes = PARTNERS
 
-    @extend_schema(tags=["Partner finance"], parameters=[PageQuery], responses={200: PAYOUT_LIST})
+    @extend_schema(
+        tags=["Partner finance"],
+        parameters=list_params(
+            "The transfer reference", multi_param("status", PayoutStatus.values), days="created"
+        ),
+        responses={200: MY_PAYOUT_PAGE, **errors(401, 403, 404, 422)},
+    )
     def get(self, request: Request) -> Response:
-        query = validated(PageQuery, request.query_params)
+        query = validated(MyPayoutQuery, request.query_params)
         _, scope, _ = _partner_scope(request)
-        return ok(services.list_payouts({}, Page.from_query(query, default_limit=10), **scope))
+        page = Page.from_query(query, default_limit=10)
+        return ok(services.list_payouts(query, page, services.MY_PAYOUT_FACETS, **scope))
 
 
 class MySettlementsView(APIView):
@@ -434,15 +531,22 @@ class MySettlementsView(APIView):
 
     @extend_schema(
         tags=["Partner finance"],
-        parameters=[PageQuery],
-        responses={200: envelope("SettlementHistory")},
+        parameters=list_params(
+            "Order number",
+            multi_param(
+                "status",
+                services.SETTLEMENT_STATES,
+                "due: in no payout yet; pending: in a payout being paid; paid",
+            ),
+            days="settled",
+        ),
+        responses={200: SETTLEMENT_PAGE, **errors(401, 403, 404, 422)},
     )
     def get(self, request: Request) -> Response:
-        query = validated(PageQuery, request.query_params)
+        query = validated(MySettlementQuery, request.query_params)
         type, _, scope = _partner_scope(request)
-        return ok(
-            services.settlement_history(Page.from_query(query, default_limit=10), type, **scope)
-        )
+        page = Page.from_query(query, default_limit=10)
+        return ok(services.settlement_history(page, type, query, **scope))
 
 
 class MyStatementView(APIView):
@@ -451,7 +555,4 @@ class MyStatementView(APIView):
     @extend_schema(tags=["Partner finance"], responses={200: PDF, **errors(404, 422)})
     def get(self, request: Request, id: str) -> HttpResponse:
         _, scope, _ = _partner_scope(request)
-        payout = Payout.objects.filter(pk=parse_id(id), **scope).first()
-        if payout is None:
-            raise ApiError.not_found("Payout not found")
-        return pdf_response(invoices.payout_statement(payout))
+        return _statement_pdf(pk=parse_id(id), **scope)

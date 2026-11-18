@@ -6,12 +6,16 @@ global one, else the default below. Rider pay is a base plus a rate per started 
 """
 
 import math
+from collections.abc import Iterable
 from typing import Any
+
+from django.db.models import Q
 
 from apps.cart.pricing import js_round
 
 EARNINGS = {
-    "restaurant_commission_basis_points": 1500,  # default: 15% of the food value after the coupon
+    # Default: 15% of the food value after the restaurant's own offers.
+    "restaurant_commission_basis_points": 1500,
     "rider_base_paise": 2000,  # ₹20 per delivery
     "rider_per_km_paise": 600,  # ₹6 per started km (straight line)
 }
@@ -19,24 +23,42 @@ EARNINGS = {
 
 def commission_bp_for(restaurant_id: Any) -> int:
     """The commission rate in effect now for this restaurant."""
+    return commissions_for([restaurant_id])[restaurant_id][0]
+
+
+def commissions_for(restaurant_ids: Iterable[Any]) -> dict[Any, tuple[int, str]]:
+    """
+    The rate in effect now for each restaurant, and where it comes from: "restaurant" (its own
+    rule) or "default" (the global rule, else the built-in default). One query for all of them.
+    """
     from .models import CommissionRule
 
-    rules = {
-        r.restaurant_id: r.basis_points
-        for r in CommissionRule.objects.filter(effective_to__isnull=True).filter(
-            restaurant_id__in=[restaurant_id]
-        )
-        | CommissionRule.objects.filter(effective_to__isnull=True, restaurant__isnull=True)
+    ids = list(restaurant_ids)
+    rules: dict[Any, int] = dict(
+        CommissionRule.objects.filter(
+            Q(restaurant_id__in=ids) | Q(restaurant__isnull=True), effective_to__isnull=True
+        ).values_list("restaurant_id", "basis_points")
+    )
+    default = rules.get(None, EARNINGS["restaurant_commission_basis_points"])
+    return {
+        i: (rules[i], "restaurant") if i is not None and i in rules else (default, "default")
+        for i in ids
     }
-    if restaurant_id in rules:
-        return rules[restaurant_id]
-    return rules.get(None, EARNINGS["restaurant_commission_basis_points"])
+
+
+def restaurant_food(order: Any) -> int:
+    """The food value the restaurant is paid on: after its own offers only. BiteBox funds every
+    other discount, so the restaurant is paid as if those were not there."""
+    return int(order.subtotal_paise - (order.restaurant_discount_paise or 0))
 
 
 def settlement_for(order: Any, commission_bp: int | None = None) -> dict[str, int]:
     bp = commission_bp_for(order.restaurant_id) if commission_bp is None else commission_bp
-    food = order.subtotal_paise - (order.discount_paise or 0)
-    restaurant = js_round(food * (10_000 - bp) / 10_000)
+    # A restaurant's own free-delivery offer is paid for out of its share too.
+    waived = sum(
+        d["delivery_paise"] for d in order.discounts or [] if d.get("funded_by") == "restaurant"
+    )
+    restaurant = js_round(restaurant_food(order) * (10_000 - bp) / 10_000) - waived
     rider = (
         EARNINGS["rider_base_paise"]
         + math.ceil((order.distance_m or 0) / 1000) * EARNINGS["rider_per_km_paise"]

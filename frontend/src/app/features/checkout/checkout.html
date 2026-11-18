@@ -97,20 +97,25 @@
         <!-- Payment -->
         <section class="bb-card" aria-labelledby="payment-title">
           <h2 id="payment-title">Payment</h2>
-          <mat-radio-group class="pay-methods" [value]="paymentMethod()" (change)="paymentMethod.set($event.value)" aria-labelledby="payment-title">
-            <mat-radio-button value="cod">
+          <mat-radio-group class="pay-methods" [value]="payWith()" (change)="choosePay($event.value)" aria-labelledby="payment-title">
+            <mat-radio-button value="cod" [disabled]="cart.busy()">
               <span class="pay-option"><np-icon name="banknote" class="mat-icon" matButtonIcon /> Cash on delivery</span>
             </mat-radio-button>
             @if (onlineAvailable()) {
-              <mat-radio-button value="online">
-                <span class="pay-option">
-                  <np-icon name="credit-card" class="mat-icon" matButtonIcon />
-                  <span class="pay-text">
-                    <span>Pay online</span>
-                    <span class="pay-hint">UPI, cards, netbanking & wallets</span>
+              @for (ch of channels; track ch.value) {
+                @let offer = paymentOffers().get(ch.value);
+                <mat-radio-button [value]="ch.value" [disabled]="cart.busy()">
+                  <span class="pay-option">
+                    <np-icon [name]="ch.icon" class="mat-icon" matButtonIcon />
+                    <span class="pay-text">
+                      <span>{{ ch.label }}</span>
+                      @if (offer) {
+                        <span class="pay-offer">Save {{ offer.savingPaise | inr }} · {{ offer.name || 'Payment offer' }}</span>
+                      }
+                    </span>
                   </span>
-                </span>
-              </mat-radio-button>
+                </mat-radio-button>
+              }
             }
           </mat-radio-group>
           @if (paymentMethod() === 'online') {
@@ -122,9 +127,36 @@
       </div>
 
       <aside class="side">
-        <!-- Coupon -->
+        <!-- Coupon: a row that opens every coupon in a dialog -->
         <section class="bb-card" aria-labelledby="coupon-title">
-          <h2 id="coupon-title">Offers</h2>
+          <h2 id="coupon-title">Offers &amp; benefits</h2>
+          @if (restaurantOffer(); as ro) {
+            <div class="applied offer">
+              <np-icon name="store" class="mat-icon" matButtonIcon />
+              <div>
+                <strong>{{ ro.name || 'Restaurant offer' }}</strong> applied
+                <span class="bb-muted small">Restaurant offer · you save {{ ro.savingPaise | inr }}</span>
+              </div>
+              @if ((q.restaurantOffers?.length ?? 0) > 1) {
+                <button mat-button type="button" (click)="showCoupons()">Change</button>
+              }
+            </div>
+          }
+          @if (suggestion(); as s) {
+            <p class="best-label">Best coupon for this cart</p>
+            <bb-coupon-ticket class="best" compact flat [offer]="s.offer" [highlight]="s.line">
+              <button
+                ticketAction
+                type="button"
+                class="bb-ticket-action"
+                [disabled]="cart.busy() || applying() !== null"
+                [attr.aria-label]="(s.switching ? 'Switch to ' : 'Apply ') + s.offer.code"
+                (click)="applyBest(s.offer.code)"
+              >
+                {{ s.switching ? 'SWITCH' : 'APPLY' }}
+              </button>
+            </bb-coupon-ticket>
+          }
           @if (q.coupon; as applied) {
             <div class="applied">
               <np-icon name="tag" class="mat-icon" matButtonIcon />
@@ -141,44 +173,16 @@
                 <span>{{ ce.code }}: {{ ce.message }} <button class="bb-link-button" (click)="removeCoupon()">Remove</button></span>
               </div>
             }
-            <form class="coupon-form" [formRoot]="couponForm">
-              <np-text-input
-                [formField]="couponForm.code"
-                ariaLabel="Coupon code"
-                placeholder="Enter coupon code"
-                icon="tag"
-                autocapitalize="characters"
-                [error]="shownError(couponForm.code)"
-              />
-              <button mat-stroked-button type="submit" [disabled]="applyingCoupon() || !couponForm.code().value().trim()">Apply</button>
-            </form>
-            @if (couponError()) {
-              <p class="field-error" role="alert">{{ couponError() }}</p>
-            }
-            @if (offers().length) {
-              <ul class="offers">
-                @for (o of offers(); track o.code) {
-                  <li>
-                    <np-icon name="ticket-percent" class="mat-icon offer-icon" />
-                    <div>
-                      <strong>{{ offerTitle(o) }}</strong>
-                      <span class="bb-muted small">{{ o.description }}</span>
-                      <span class="code">{{ o.code }}</span>
-                    </div>
-                    <button
-                      mat-flat-button
-                      class="bb-btn-accent"
-                      type="button"
-                      (click)="applyCoupon(o.code)"
-                      [disabled]="applyingCoupon()"
-                      [attr.aria-label]="'Apply coupon ' + o.code"
-                    >
-                      Apply
-                    </button>
-                  </li>
+            <button type="button" class="coupon-row" (click)="showCoupons()">
+              <np-icon name="ticket-percent" class="mat-icon" matButtonIcon />
+              <span>
+                <strong>Apply coupon</strong>
+                @if (offers().length) {
+                  <small>{{ offers().length }} {{ offers().length === 1 ? 'offer' : 'offers' }} available</small>
                 }
-              </ul>
-            }
+              </span>
+              <np-icon name="chevron-right" class="mat-icon chevron" matButtonIcon />
+            </button>
           }
         </section>
 
@@ -201,10 +205,11 @@
           <bb-bill-summary
             [pricing]="q.pricing"
             [couponCode]="q.coupon?.code"
+            [discounts]="q.discounts"
             [distanceMeters]="q.delivery?.distanceMeters ?? null"
             [coinsRedeemed]="q.coins?.applied"
           />
-          @if (q.delivery && !q.delivery.freeDelivery && q.pricing.subtotalPaise - q.pricing.discountPaise < q.delivery.freeDeliveryThresholdPaise) {
+          @if (q.delivery && !q.delivery.freeDelivery && !q.pricing.deliveryDiscountPaise && q.pricing.subtotalPaise - q.pricing.discountPaise < q.delivery.freeDeliveryThresholdPaise) {
             <p class="hint small">
               Add {{ q.delivery.freeDeliveryThresholdPaise - (q.pricing.subtotalPaise - q.pricing.discountPaise) | inr }} more for free delivery
             </p>

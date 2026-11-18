@@ -15,10 +15,11 @@ from django.db.models import Count, Q, QuerySet
 from django.utils import timezone
 
 from apps.accounts.models import User, UserStatus
-from apps.notifications.services import notify, notify_admins
+from apps.notifications.services import admins_with, notify, notify_admins
 from apps.orders.models import Order
 from apps.rbac.roles import ADMIN_ROLES, Permission, Role, has_permission
 from common.api import ApiError
+from common.filters import Facet, any_of, apply_facets, days_between, text_search, with_facets
 from common.pagination import Page, paginate
 
 from .models import (
@@ -125,6 +126,15 @@ def _message(
     )
 
 
+def _find(ticket_id: uuid.UUID, *, lock: bool = False, **scope: Any) -> SupportTicket:
+    """The ticket (`scope`, e.g. raised_by=user, limits whose), else 404."""
+    qs = SupportTicket.objects.select_for_update() if lock else SupportTicket.objects
+    ticket = qs.filter(pk=ticket_id, **scope).first()
+    if ticket is None:
+        raise ApiError.not_found("Ticket not found")
+    return ticket
+
+
 def _save_events(events: list[SupportTicketEvent]) -> None:
     # One at a time so each row gets its own (increasing) created_at.
     for event in events:
@@ -201,9 +211,13 @@ def _history_json(e: SupportTicketEvent) -> dict[str, Any]:
 
 
 def _staff_view(ticket_id: uuid.UUID) -> dict[str, Any]:
-    ticket = SupportTicket.objects.select_related("assignee", "raised_by", "order").get(
-        pk=ticket_id
+    ticket = (
+        SupportTicket.objects.select_related("assignee", "raised_by", "order")
+        .filter(pk=ticket_id)
+        .first()
     )
+    if ticket is None:
+        raise ApiError.not_found("Ticket not found")
     messages = list(ticket.messages.order_by("created_at", "id"))
     history = list(ticket.history.order_by("created_at", "id"))
     r = ticket.raised_by
@@ -284,35 +298,50 @@ def create(user: User, data: dict[str, Any]) -> dict[str, Any]:
     return _requester_view(ticket)
 
 
+# A requester's ticket states (overlapping): "open" is every ticket not resolved or closed yet
+# (waiting for their reply included), "closed" every resolved or closed one.
+MINE_STATUS_MATCH = {
+    "open": Q(status__in=OPEN),
+    "waiting_for_response": Q(status=T.WAITING_FOR_RESPONSE),
+    "closed": Q(status__in=[T.RESOLVED, T.CLOSED]),
+}
+MINE_STATUSES = list(MINE_STATUS_MATCH)
+# "Help & support"'s Filters panel (counted over the requester's own tickets only).
+MINE_FACETS = (
+    Facet("status", values=MINE_STATUSES, cases=MINE_STATUS_MATCH),
+    Facet("type", values=TicketType.values),
+)
+
+
+def _mine(user: User, query: dict[str, Any]) -> QuerySet[SupportTicket]:
+    """The tickets `user` raised matching MINE_FACETS, the day created and a search over the
+    number, subject and order number."""
+    qs = apply_facets(SupportTicket.objects.filter(raised_by=user), query, MINE_FACETS)
+    return qs.filter(
+        days_between(query, "created"),
+        text_search(query.get("search"), "number", "subject", "order_number"),
+    )
+
+
 def list_mine(user: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
-    qs = SupportTicket.objects.filter(raised_by=user)
-    if query.get("status") == "open":
-        qs = qs.filter(status__in=OPEN)
-    elif query.get("status") == "closed":
-        qs = qs.filter(status__in=[T.RESOLVED, T.CLOSED])
-    items, meta = paginate(qs.order_by("-last_activity_at", "-id"), page)
-    return {
+    """The requester's own tickets, most recent activity first. `?facets=1` adds the Filters
+    panel's counts (of their own tickets)."""
+    items, meta = paginate(_mine(user, query).order_by("-last_activity_at", "-id"), page)
+    result = {
         "items": [_requester_view(t, with_messages=False) for t in items],
         "pagination": meta,
     }
-
-
-def _find_mine(user: User, ticket_id: uuid.UUID, *, lock: bool = False) -> SupportTicket:
-    qs = SupportTicket.objects.select_for_update() if lock else SupportTicket.objects
-    ticket = qs.filter(pk=ticket_id, raised_by=user).first()
-    if ticket is None:
-        raise ApiError.not_found("Ticket not found")
-    return ticket
+    return with_facets(result, query, lambda q: _mine(user, q), MINE_FACETS)
 
 
 def get_mine(user: User, ticket_id: uuid.UUID) -> dict[str, Any]:
-    return _requester_view(_find_mine(user, ticket_id))
+    return _requester_view(_find(ticket_id, raised_by=user))
 
 
 def reply_mine(user: User, ticket_id: uuid.UUID, body: str) -> dict[str, Any]:
     """The requester replies. A resolved ticket reopens; a closed one needs a new ticket."""
     with transaction.atomic():
-        ticket = _find_mine(user, ticket_id, lock=True)
+        ticket = _find(ticket_id, lock=True, raised_by=user)
         if ticket.status == T.CLOSED:
             raise ApiError.bad_request("This ticket is closed. Please open a new one.")
         _message(ticket, user, body)
@@ -367,56 +396,84 @@ def dashboard() -> dict[str, Any]:
 
 def staff_list() -> dict[str, Any]:
     """People a ticket can be assigned to: active admins with the support permission."""
-    users = User.objects.filter(role__in=_support_roles(), status=UserStatus.ACTIVE).order_by(
-        "name", "id"
-    )
+    users = admins_with(Permission.SUPPORT_MANAGE)
     return {"items": [{"id": str(u.pk), "name": u.name, "role": u.role} for u in users]}
 
 
-def _support_roles() -> list[str]:
-    return [r.value for r in ADMIN_ROLES if has_permission(r, Permission.SUPPORT_MANAGE)]
+def _support_admin(user_id: uuid.UUID) -> User:
+    assignee = User.objects.filter(
+        pk=user_id, status=UserStatus.ACTIVE, role__in=list(ADMIN_ROLES)
+    ).first()
+    if assignee is None or not has_permission(assignee, Permission.SUPPORT_MANAGE):
+        raise ApiError.bad_request("Assign the ticket to an active support admin")
+    return assignee
+
+
+def _assignee_match(values: list[Any]) -> Q:
+    """Unassigned tickets ("unassigned") or those of the given admins (ids; "me" resolved)."""
+    return any_of(
+        values,
+        lambda v: Q(assignee__isnull=True) if v == "unassigned" else Q(assignee_id=v),
+    )
+
+
+class AssigneeFacet(Facet):
+    """The admins tickets are assigned to (id, name, count), after "unassigned" (always listed)."""
+
+    def count(self, qs: QuerySet[Any]) -> list[dict[str, Any]]:
+        unassigned = qs.order_by().filter(assignee__isnull=True).count()
+        unassigned_row = {"value": "unassigned", "label": "Not assigned", "count": unassigned}
+        return [unassigned_row, *super().count(qs)]
+
+
+# The queue's Filters panel. `status` also takes "active" (not resolved or closed yet).
+STAFF_FACETS = (
+    Facet(
+        "status",
+        values=TicketStatus.values,
+        match=lambda values: Q(
+            status__in={s for v in values for s in (OPEN if v == "active" else [v])}
+        ),
+    ),
+    Facet("priority", values=TicketPriority.values),
+    Facet("type", values=TicketType.values),
+    Facet("requester_role", values=RequesterRole.values),
+    AssigneeFacet("assignee", label="assignee__name", match=_assignee_match),
+)
+
+
+def _staff_queue(query: dict[str, Any]) -> QuerySet[SupportTicket]:
+    """The tickets matching every filter (STAFF_FACETS, the requester, the day created and the
+    search over the number, subject, order number and requester's name)."""
+    qs = apply_facets(SupportTicket.objects.all(), query, STAFF_FACETS)
+    if query.get("requester"):
+        qs = qs.filter(raised_by_id=query["requester"])
+    return qs.filter(
+        days_between(query, "created"),
+        text_search(query.get("search"), "number", "subject", "order_number", "requester_name"),
+    )
 
 
 def staff_tickets(staff: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
-    qs: QuerySet[SupportTicket] = SupportTicket.objects.select_related("assignee")
-    status = query.get("status")
-    if status == "active":
-        qs = qs.filter(status__in=OPEN)
-    elif status:
-        qs = qs.filter(status=status)
-    for field in ("priority", "requester_role", "type"):
-        if query.get(field):
-            qs = qs.filter(**{field: query[field]})
-    if query.get("assignee") == "me":
-        qs = qs.filter(assignee=staff)
-    elif query.get("assignee") == "unassigned":
-        qs = qs.filter(assignee__isnull=True)
-    search = (query.get("search") or "").strip()
-    if search:
-        qs = qs.filter(
-            Q(number__icontains=search)
-            | Q(subject__icontains=search)
-            | Q(order_number__icontains=search)
-            | Q(requester_name__icontains=search)
-        )
-    qs = qs.annotate(message_count=Count("messages")).order_by("-last_activity_at", "-id")
+    """Most recent activity first; `?facets=1` adds the Filters panel's counts."""
+    if query.get("assignee"):
+        query = {**query, "assignee": [staff.pk if v == "me" else v for v in query["assignee"]]}
+    qs = (
+        _staff_queue(query)
+        .select_related("assignee")
+        .annotate(message_count=Count("messages"))
+        .order_by("-last_activity_at", "-id")
+    )
     items, meta = paginate(qs, page)
-    return {
+    result = {
         "items": [_staff_summary(t, t.message_count) for t in items],
         "pagination": meta,
     }
-
-
-def _find(ticket_id: uuid.UUID, *, lock: bool = False) -> SupportTicket:
-    qs = SupportTicket.objects.select_for_update() if lock else SupportTicket.objects
-    ticket = qs.filter(pk=ticket_id).first()
-    if ticket is None:
-        raise ApiError.not_found("Ticket not found")
-    return ticket
+    return with_facets(result, query, _staff_queue, STAFF_FACETS)
 
 
 def get(ticket_id: uuid.UUID) -> dict[str, Any]:
-    return _staff_view(_find(ticket_id).pk)
+    return _staff_view(ticket_id)
 
 
 def update(staff: User, ticket_id: uuid.UUID, data: dict[str, Any]) -> dict[str, Any]:
@@ -449,29 +506,16 @@ def update(staff: User, ticket_id: uuid.UUID, data: dict[str, Any]) -> dict[str,
                 _event(ticket, staff, "priority", from_value=ticket.priority, to_value=priority)
             )
             ticket.priority = priority
-        if "assignee_id" in data:
-            wanted = data["assignee_id"]
-            if wanted != ticket.assignee_id:
-                assignee = None
-                if wanted:
-                    assignee = User.objects.filter(
-                        pk=wanted, status=UserStatus.ACTIVE, role__in=list(ADMIN_ROLES)
-                    ).first()
-                    if assignee is None or not has_permission(
-                        assignee.role, Permission.SUPPORT_MANAGE
-                    ):
-                        raise ApiError.bad_request("Assign the ticket to an active support admin")
-                events.append(
-                    _event(
-                        ticket,
-                        staff,
-                        "assigned",
-                        to_value=assignee.name if assignee else "Unassigned",
-                    )
+        if "assignee_id" in data and data["assignee_id"] != ticket.assignee_id:
+            assignee = _support_admin(data["assignee_id"]) if data["assignee_id"] else None
+            events.append(
+                _event(
+                    ticket, staff, "assigned", to_value=assignee.name if assignee else "Unassigned"
                 )
-                ticket.assignee = assignee
-                if assignee is not None and assignee.pk != staff.pk:
-                    assigned_to = assignee
+            )
+            ticket.assignee = assignee
+            if assignee is not None and assignee.pk != staff.pk:
+                assigned_to = assignee
         if not events:
             return _staff_view(ticket.pk)
         _save_events(events)

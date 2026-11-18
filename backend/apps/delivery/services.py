@@ -5,27 +5,37 @@ and offline, position reports, and the admin list of riders.
 
 import contextlib
 import uuid
+from datetime import datetime
 from typing import Any
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import BooleanField, Count, Exists, ExpressionWrapper, OuterRef, Q, QuerySet
 from django.utils import timezone
 
-from apps.accounts.models import RevokedReason, User, UserStatus
+from apps.accounts.models import User
 from apps.accounts.serializers import user_json
-from apps.accounts.services import end_sessions
 from apps.kyc import services as kyc
+from apps.kyc.models import DocumentStatus, KycDocument, PayoutAccount
 from apps.notifications.services import notify, notify_admins
 from apps.orders import presenters
 from apps.orders.models import Order, OrderStatus
 from apps.rbac.roles import Permission, Role
 from apps.restaurants.presenters import geo_json, rating_json
 from common.api import ApiError
+from common.filters import Facet, apply_facets, with_facets
 from common.geo import GeoPoint, haversine_m
 from common.pagination import Page, paginate
 
-from .models import VERIFICATION_TRANSITIONS, DeliveryPartner, RiderVehicle, VerificationStatus
+from .models import (
+    VERIFICATION_TRANSITIONS,
+    AvailabilitySource,
+    DeliveryPartner,
+    RiderAvailabilityLog,
+    RiderVehicle,
+    VehicleType,
+    VerificationStatus,
+)
 
 V = VerificationStatus
 # (notification type, title, body) per decision.
@@ -43,6 +53,12 @@ VERIFICATION_NOTICE = {
     ),
 }
 
+# Why the system took a rider offline when an admin withdrew their verification.
+VERIFICATION_OFFLINE_REASON = {
+    V.REJECTED: "Verification rejected",
+    V.RESUBMISSION_REQUESTED: "Documents requested again",
+}
+
 
 def get_or_create_profile(user: User) -> DeliveryPartner:
     """The rider's profile, created on first use."""
@@ -56,15 +72,71 @@ def get_or_create_profile(user: User) -> DeliveryPartner:
         return DeliveryPartner.objects.get(user=user)
 
 
-def _vehicle(profile: DeliveryPartner) -> RiderVehicle | None:
+def rider_user(user_id: uuid.UUID) -> User:
+    user = User.objects.filter(pk=user_id, role=Role.DELIVERY).first()
+    if user is None:
+        raise ApiError.not_found("Delivery partner not found")
+    return user
+
+
+def vehicle_of(profile: DeliveryPartner) -> RiderVehicle | None:
     try:
         return profile.vehicle
     except RiderVehicle.DoesNotExist:
         return None
 
 
+# List filter: riders still waiting on themselves (status pending, something not sent yet).
+NOT_SUBMITTED = "not_submitted"
+P = "delivery_partner__"  # from a user to their rider profile
+AVAILABILITY_VALUES = ("online", "offline", "busy")
+AVAILABILITY = {
+    "online": Q(**{f"{P}is_online": True, f"{P}active_order__isnull": True}),
+    "busy": Q(**{f"{P}is_online": True, f"{P}active_order__isnull": False}),
+    "offline": Q(**{f"{P}is_online": False}) | Q(delivery_partner__isnull=True),
+}
+# Facets (and filters) shared by both admin rider lists (this one and accounts.FACETS).
+AVAILABILITY_FACET = Facet("availability", values=AVAILABILITY_VALUES, cases=AVAILABILITY)
+VEHICLE_TYPE_FACET = Facet(
+    "vehicle_type", values=VehicleType.values, field=f"{P}vehicle__vehicle_type"
+)
+ZONE_FACET = Facet("zone", field=f"{P}zone", ignore_case=True)  # the zones that occur, by count
+
+
+def with_submitted(users: QuerySet[User]) -> QuerySet[User]:
+    """
+    Annotates `submitted`: the rider has sent everything an admin checks, so a pending rider is
+    really waiting for review. That is each required document (not rejected), a bank account, the
+    home address and the vehicle. Until then they are "not submitted", not "in review".
+    """
+    kinds = kyc.KINDS_FOR[Role.DELIVERY]
+    all_documents = (
+        KycDocument.objects.filter(user=OuterRef("pk"), kind__in=kinds)
+        .exclude(status=DocumentStatus.REJECTED)
+        .order_by()
+        .values("user")
+        .annotate(n=Count("kind", distinct=True))
+        .filter(n=len(kinds))
+    )
+    return users.annotate(
+        submitted=ExpressionWrapper(
+            Q(
+                Exists(all_documents),
+                Exists(PayoutAccount.objects.filter(user=OuterRef("pk"))),
+                delivery_partner__address__isnull=False,
+                delivery_partner__vehicle__isnull=False,
+            ),
+            output_field=BooleanField(),
+        )
+    )
+
+
+def is_submitted(user_id: uuid.UUID) -> bool:
+    return with_submitted(User.objects.filter(pk=user_id)).filter(Q(submitted=True)).exists()
+
+
 def profile_json(profile: DeliveryPartner) -> dict[str, Any]:
-    vehicle = _vehicle(profile)
+    vehicle = vehicle_of(profile)
     data: dict[str, Any] = {
         "id": str(profile.pk),
         "user": str(profile.user_id),
@@ -79,6 +151,7 @@ def profile_json(profile: DeliveryPartner) -> dict[str, Any]:
             "status": profile.verification_status,
             "reason": profile.verification_reason or None,
             "verified_at": profile.verified_at,
+            "submitted": is_submitted(profile.user_id),
         },
         "created_at": profile.created_at,
         "updated_at": profile.updated_at,
@@ -100,8 +173,7 @@ def dashboard(user: User) -> dict[str, Any]:
     """Profile + the offer waiting for them + the order they carry: the whole dashboard."""
     from apps.dispatch.models import AssignmentStatus
 
-    profile = get_or_create_profile(user)
-    profile.refresh_from_db()
+    profile = get_or_create_profile(user)  # read fresh, with the vehicle
     offer = (
         presenters.with_details(
             Order.objects.filter(
@@ -119,13 +191,12 @@ def dashboard(user: User) -> dict[str, Any]:
         if profile.active_order_id
         else None
     )
-    offer_json = presenters.present_for_rider(offer, user.pk) if offer else None
-    if offer is not None and offer_json is not None:
+    offer_json = None
+    if offer is not None:
+        offer_json = presenters.present_for_rider(offer, user.pk)
         offer_json["pickup_distance_meters"] = _pickup_distance(profile, offer)
     return {
-        "profile": profile_json(
-            DeliveryPartner.objects.select_related("vehicle").get(pk=profile.pk)
-        ),
+        "profile": profile_json(profile),
         "offer": offer_json,
         "active_order": presenters.present_for_rider(active, user.pk) if active else None,
     }
@@ -133,10 +204,10 @@ def dashboard(user: User) -> dict[str, Any]:
 
 def _pickup_distance(profile: DeliveryPartner, order: Order) -> int | None:
     """Straight-line metres from the rider's last GPS fix to the restaurant (None without a fix)."""
-    coordinates = ((order.restaurant_snapshot or {}).get("location") or {}).get("coordinates")
-    if profile.location is None or not coordinates:
+    restaurant = presenters.restaurant_point(order.restaurant_snapshot)
+    if profile.location is None or restaurant is None:
         return None
-    return haversine_m(profile.location, GeoPoint(lat=coordinates[1], lng=coordinates[0]))
+    return haversine_m(profile.location, restaurant)
 
 
 def update_vehicle(user: User, vehicle_type: str, vehicle_number: str | None) -> dict[str, Any]:
@@ -163,38 +234,84 @@ def set_availability(
                 "BiteBox is still verifying your documents. You can go online once approved.",
                 code="RIDER_NOT_VERIFIED",
             )
-        if _vehicle(profile) is None:
+        if vehicle_of(profile) is None:
             raise ApiError.bad_request("Add your vehicle details before going online")
         if latitude is None or longitude is None:
             raise ApiError.bad_request("Share your location to go online")
         now = timezone.now()
-        DeliveryPartner.objects.filter(pk=profile.pk).update(
-            is_online=True,
-            location=GeoPoint(lat=latitude, lng=longitude),
-            location_updated_at=now,
-            updated_at=now,
-        )
+        fields = {
+            "location": GeoPoint(lat=latitude, lng=longitude),
+            "location_updated_at": now,
+            "updated_at": now,
+        }
+        with transaction.atomic():
+            went_online = DeliveryPartner.objects.filter(pk=profile.pk, is_online=False).update(
+                is_online=True, **fields
+            )
+            if went_online:
+                log_availability(user.pk, True, AvailabilitySource.RIDER, at=now)
+            else:  # already online: just the new position
+                DeliveryPartner.objects.filter(pk=profile.pk).update(**fields)
         _offer_waiting_orders()
         return dashboard(user)
-    take_offline(user, profile, "Finish your current delivery before going offline")
+    take_offline(
+        user,
+        profile,
+        "Finish your current delivery before going offline",
+        source=AvailabilitySource.RIDER,
+    )
     return dashboard(user)
 
 
-def take_offline(user: User, profile: DeliveryPartner | None, busy_message: str) -> None:
-    """Offline rules shared by the rider and admins: never mid-delivery; an offer is passed on."""
+def log_availability(
+    rider_id: uuid.UUID,
+    is_online: bool,
+    source: str,
+    reason: str | None = None,
+    at: datetime | None = None,
+) -> None:
+    """One availability history row; callers record only real changes (append-only)."""
+    RiderAvailabilityLog.objects.create(
+        rider_id=rider_id,
+        is_online=is_online,
+        source=source,
+        reason=(reason or "")[:500],
+        at=at or timezone.now(),
+    )
+
+
+def take_offline(
+    user: User,
+    profile: DeliveryPartner | None,
+    busy_message: str,
+    *,
+    source: str = AvailabilitySource.SYSTEM,
+    reason: str | None = None,
+) -> bool:
+    """
+    Offline rules shared by the rider, admins and the system: never mid-delivery; an offer is
+    passed on. Logs the availability history when the rider was online. Returns whether they were.
+    """
     from apps.dispatch.services import decline_offer
 
     if profile is None:
-        return
+        return False
     profile.refresh_from_db()
     if profile.active_order_id:
         raise ApiError(409, busy_message, code="DELIVERY_IN_PROGRESS")
     if profile.current_offer_id:
         with contextlib.suppress(ApiError):
             decline_offer(user.pk, profile.current_offer_id)
-    DeliveryPartner.objects.filter(pk=profile.pk).update(
-        is_online=False, current_offer=None, updated_at=timezone.now()
-    )
+    now = timezone.now()
+    with transaction.atomic():
+        went_offline = DeliveryPartner.objects.filter(pk=profile.pk, is_online=True).update(
+            is_online=False, current_offer=None, updated_at=now
+        )
+        if went_offline:
+            log_availability(user.pk, False, source, reason, now)
+        else:
+            DeliveryPartner.objects.filter(pk=profile.pk).update(current_offer=None, updated_at=now)
+    return bool(went_offline)
 
 
 def update_location(user: User, latitude: float, longitude: float) -> dict[str, Any]:
@@ -224,16 +341,36 @@ def _offer_waiting_orders() -> None:
 # ---------------------------------------------------------------------------
 # Admin
 # ---------------------------------------------------------------------------
-def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
-    users = User.objects.filter(role=Role.DELIVERY)
+_PENDING = Q(**{f"{P}verification_status": V.PENDING}) | Q(delivery_partner__isnull=True)
+# not_submitted: pending without everything sent; pending: in review (sent, waiting for a decision)
+VERIFICATION = {
+    V.PENDING: _PENDING & Q(submitted=True),
+    **{v: Q(**{f"{P}verification_status": v}) for v in V.values if v != V.PENDING},
+    NOT_SUBMITTED: _PENDING & Q(submitted=False),
+}
+VERIFICATION_VALUES = [*V.values, NOT_SUBMITTED]
+ADMIN_FACETS = (
+    Facet("verification", values=VERIFICATION_VALUES, cases=VERIFICATION),
+    AVAILABILITY_FACET,
+    VEHICLE_TYPE_FACET,
+    ZONE_FACET,
+)
+
+
+def _admin_riders(query: dict[str, Any]) -> QuerySet[User]:
+    """The riders matching the filters (ADMIN_FACETS, `online`, `search`)."""
+    users = with_submitted(User.objects.filter(role=Role.DELIVERY))
     if search := (query.get("search") or "").strip():
         users = users.filter(
             Q(name__icontains=search) | Q(email__icontains=search) | Q(phone__icontains=search)
         )
     if query.get("online") is True:
         users = users.filter(delivery_partner__is_online=True)
-    if verification := query.get("verification"):
-        users = users.filter(delivery_partner__verification_status=verification)
+    return apply_facets(users, query, ADMIN_FACETS)
+
+
+def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
+    users = _admin_riders(query)
     rows, meta = paginate(users.order_by("-created_at"), page)
     profiles = {
         p.user_id: p
@@ -244,7 +381,7 @@ def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
     items = []
     for u in rows:
         p = profiles.get(u.pk)
-        vehicle = _vehicle(p) if p else None
+        vehicle = vehicle_of(p) if p else None
         active = p.active_order if p else None
         items.append(
             {
@@ -253,6 +390,7 @@ def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
                 "vehicle_number": (vehicle.vehicle_number or None) if vehicle else None,
                 "is_online": p.is_online if p else False,
                 "verification_status": p.verification_status if p else V.PENDING,
+                "submitted": u.submitted,
                 "location_updated_at": p.location_updated_at if p else None,
                 "completed_deliveries": p.completed_deliveries if p else 0,
                 "rating": rating_json(p) if p else None,
@@ -265,27 +403,21 @@ def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
                 else None,
             }
         )
-    return {"items": items, "pagination": meta}
+    return with_facets({"items": items, "pagination": meta}, query, _admin_riders, ADMIN_FACETS)
 
 
-def admin_set_status(user_id: uuid.UUID, status: str) -> User:
-    """Suspend or reactivate a rider. Suspending takes them offline; not allowed mid-delivery."""
-    user = User.objects.filter(pk=user_id, role=Role.DELIVERY).first()
-    if user is None:
-        raise ApiError.not_found("Delivery partner not found")
-    if status == UserStatus.SUSPENDED:
-        take_offline(
-            user,
-            DeliveryPartner.objects.filter(user=user).first(),
-            "This rider is carrying an order. Unassign or finish it first.",
-        )
-    user.status = status
-    end_sessions(
-        user,
-        RevokedReason.SUSPENDED if status == UserStatus.SUSPENDED else RevokedReason.LOGOUT,
-        fields=("status",),
-    )
-    return user
+def admin_set_status(
+    user_id: uuid.UUID, status: str, reason: str | None
+) -> tuple[User, dict[str, Any]]:
+    """
+    Sets a rider's account status (same rules as /admin/users/:id/status). Any status but active
+    takes them offline (not allowed mid-delivery) and signs them out. Returns the user and the
+    changes ({} when the status was already that).
+    """
+    from apps.accounts.admin_services import apply_status
+
+    user = rider_user(user_id)
+    return user, apply_status(user, status, reason)
 
 
 # --- verification ---------------------------------------------------------------------------------
@@ -323,18 +455,14 @@ def verification_gaps(user: User, profile: DeliveryPartner) -> list[str]:
 
 
 def admin_get(user_id: uuid.UUID) -> dict[str, Any]:
-    user = User.objects.filter(pk=user_id, role=Role.DELIVERY).first()
-    if user is None:
-        raise ApiError.not_found("Delivery partner not found")
+    user = rider_user(user_id)
     return {"user": user_json(user), "profile": profile_json(get_or_create_profile(user))}
 
 
 def admin_set_verification(
     user_id: uuid.UUID, status: str, reason: str, admin: User
 ) -> dict[str, Any]:
-    user = User.objects.filter(pk=user_id, role=Role.DELIVERY).first()
-    if user is None:
-        raise ApiError.not_found("Delivery partner not found")
+    user = rider_user(user_id)
     profile = get_or_create_profile(user)
     current = profile.verification_status
     if status not in VERIFICATION_TRANSITIONS.get(current, frozenset()):
@@ -359,7 +487,12 @@ def admin_set_verification(
             )
     if status != V.APPROVED:  # no longer allowed online
         with contextlib.suppress(ApiError):
-            take_offline(user, DeliveryPartner.objects.get(pk=profile.pk), "")
+            take_offline(
+                user,
+                DeliveryPartner.objects.get(pk=profile.pk),
+                "",
+                reason=VERIFICATION_OFFLINE_REASON[V(status)],
+            )
     kind, title, body = VERIFICATION_NOTICE[V(status)]
     notify(
         user.pk,

@@ -8,12 +8,15 @@ import {
   AddressInput,
   AdminCoupon,
   AdminCouponInput,
+  OfferKind,
+  PaymentChannel,
   CouponOffer,
   DeliveryAddress,
   Order,
 } from '../../shared/models/checkout.models';
 import { CheckoutSession, PaymentMethod } from '../../shared/models/payment.models';
 import { toParams } from './http-params';
+import { CouponApi, One } from './coupon-api';
 
 @Injectable({ providedIn: 'root' })
 export class AddressService {
@@ -52,6 +55,8 @@ export class AddressService {
 export interface PlaceOrderRequest {
   addressId: string;
   paymentMethod: PaymentMethod;
+  /** Online orders: UPI, card, net banking or wallet (prices that channel's payment offer). */
+  paymentChannel?: PaymentChannel;
   note?: string;
   expectedTotalPaise: number;
 }
@@ -114,37 +119,38 @@ export class OrderService {
       })
       .pipe(map((r) => r.data.coupons));
   }
+  /** The Offers page: every offer this customer can use, best first, optionally of one kind. */
+  offers(kind?: OfferKind): Observable<CouponOffer[]> {
+    return this.http
+      .get<ApiResponse<{ offers: CouponOffer[] }>>(`${this.api}/coupons/offers`, {
+        params: toParams({ type: kind }),
+      })
+      .pipe(map((r) => r.data.offers));
+  }
+
 }
 
 @Injectable({ providedIn: 'root' })
-export class AdminCouponService {
-  private readonly http = inject(HttpClient);
-  private readonly url = `${environment.baseUrl}/admin/coupons`;
+export class AdminCouponService extends CouponApi<AdminCouponInput> {
+  protected readonly url = `${environment.baseUrl}/admin/coupons`;
+  private readonly offers = `${environment.baseUrl}/admin/restaurant-offers`;
 
-  list(query: {
-    search?: string;
-    active?: boolean;
-    page?: number;
-    limit?: number;
-  }): Observable<Paginated<AdminCoupon>> {
+  duplicate(id: string): Observable<AdminCoupon> {
+    return this.one(this.http.post<One>(`${this.url}/${id}/duplicate`, {}));
+  }
+
+  /** Restaurant offers waiting for review. */
+  pending(query: { page?: number; limit?: number }): Observable<Paginated<AdminCoupon>> {
     return this.http
-      .get<ApiResponse<Paginated<AdminCoupon>>>(this.url, { params: toParams(query) })
+      .get<ApiResponse<Paginated<AdminCoupon>>>(`${this.offers}/pending`, { params: toParams(query) })
       .pipe(map((r) => r.data));
   }
 
-  create(input: AdminCouponInput): Observable<AdminCoupon> {
-    return this.http
-      .post<ApiResponse<{ coupon: AdminCoupon }>>(this.url, input)
-      .pipe(map((r) => r.data.coupon));
+  approve(id: string): Observable<AdminCoupon> {
+    return this.one(this.http.post<One>(`${this.offers}/${id}/approve`, {}));
   }
 
-  update(id: string, input: AdminCouponInput): Observable<AdminCoupon> {
-    return this.http
-      .patch<ApiResponse<{ coupon: AdminCoupon }>>(`${this.url}/${id}`, input)
-      .pipe(map((r) => r.data.coupon));
-  }
-
-  remove(id: string): Observable<void> {
-    return this.http.delete<ApiResponse<null>>(`${this.url}/${id}`).pipe(map(() => undefined));
+  reject(id: string, reason: string): Observable<AdminCoupon> {
+    return this.one(this.http.post<One>(`${this.offers}/${id}/reject`, { reason }));
   }
 }

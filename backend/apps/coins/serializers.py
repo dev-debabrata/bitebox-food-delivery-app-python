@@ -10,7 +10,9 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.fields import empty
 
+from apps.accounts.serializers import JoinedListQuery
 from common.fields import QueryBoolean, UUIDRef
+from common.filters import FacetQuery, MultiIdField, multi_choice
 from common.validation import PageQuery
 
 from .models import (
@@ -19,15 +21,18 @@ from .models import (
     CampaignStatus,
     CampaignTrigger,
     CampaignType,
+    ClaimStatus,
     CoinSource,
     CustomerGroup,
     ReferralRewardStatus,
+    ReferralRisk,
     ReferralStatus,
     RewardType,
     TxnType,
 )
 
 INVALID = "Invalid value"
+TEXT_ERRORS = ("required", "null", "blank", "invalid", "min_length", "max_length")
 
 
 def choice(choices: list[str], message: str = INVALID) -> serializers.ChoiceField:
@@ -94,10 +99,7 @@ class ReferralCodeInput(serializers.Serializer):
     code = Text(
         min_length=4,
         max_length=40,
-        error_messages=dict.fromkeys(
-            ("required", "null", "blank", "invalid", "min_length", "max_length"),
-            "Enter a referral code",
-        ),
+        error_messages=dict.fromkeys(TEXT_ERRORS, "Enter a referral code"),
     )
 
     def validate_code(self, value: str) -> str:
@@ -191,10 +193,7 @@ class CampaignInput(serializers.Serializer):
     name = Text(
         min_length=3,
         max_length=80,
-        error_messages=dict.fromkeys(
-            ("required", "null", "blank", "invalid", "min_length", "max_length"),
-            "Name: 3 to 80 characters",
-        ),
+        error_messages=dict.fromkeys(TEXT_ERRORS, "Name: 3 to 80 characters"),
     )
     description = Text(required=False, allow_blank=True, max_length=500)
     type = serializers.ChoiceField(
@@ -222,25 +221,42 @@ class CampaignStatusInput(serializers.Serializer):
     )
 
 
-class CampaignListQuery(PageQuery):
-    status = choice(CampaignStatus.values)
-    type = choice(CampaignType.values)
+class CampaignListQuery(FacetQuery, JoinedListQuery):
+    """GET /admin/rewards/campaigns: runsFrom/runsTo keep those running on any of those days."""
+
+    status = multi_choice(CampaignStatus.values)
+    type = multi_choice(CampaignType.values)
+    trigger = multi_choice(CampaignTrigger.values)
+    customer_group = multi_choice(CustomerGroup.values)
+    day_range = "runs"
 
 
-class ClaimListQuery(PageQuery):
-    reward_type = choice(RewardType.values)
-    campaign = UUIDRef(message=INVALID, required=False)
+class ClaimListQuery(FacetQuery, JoinedListQuery):
+    """GET /admin/rewards/claims (the reward history)."""
+
+    reward_type = multi_choice(RewardType.values)
+    status = multi_choice(ClaimStatus.values)
+    campaign = MultiIdField()
+    day_range = "claimed"
 
 
-class AdminTransactionQuery(CoinTransactionQuery):
+class AdminTransactionQuery(FacetQuery, PageQuery):
+    """GET /admin/rewards/transactions: `userId` is one customer, from/to are instants."""
+
+    type = multi_choice(TxnType.values)
+    source = multi_choice(CoinSource.values)  # type: ignore[assignment]
+    campaign = MultiIdField()
     user_id = UUIDRef(message=INVALID, required=False)
     from_ = serializers.DateTimeField(required=False, error_messages={"invalid": INVALID})
     to = serializers.DateTimeField(required=False, error_messages={"invalid": INVALID})
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        # `from` is a Python keyword: declare it under another name, read it as `from`.
-        self.fields["from"] = self.fields.pop("from_")
+        # `from` is a Python keyword: declare it under another name, read it as `from` (rebound
+        # without its first source, so the validated value is under "from" too).
+        field = self.fields.pop("from_")
+        field.source = None
+        self.fields["from"] = field
 
 
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_-]{8,100}$")
@@ -251,17 +267,18 @@ class ReverseInput(serializers.Serializer):
     reason = Text(
         min_length=3,
         max_length=300,
-        error_messages=dict.fromkeys(
-            ("required", "null", "blank", "invalid", "min_length", "max_length"),
-            "Give a reason (3-300 characters)",
-        ),
+        error_messages=dict.fromkeys(TEXT_ERRORS, "Give a reason (3-300 characters)"),
     )
 
 
-class AdminReferralQuery(PageQuery):
-    status = choice(ReferralStatus.values)
-    reward_status = choice(ReferralRewardStatus.values)
+class AdminReferralQuery(FacetQuery, JoinedListQuery):
+    """GET /admin/rewards/referrals: `flagged=true` keeps those with any risk signal."""
+
+    status = multi_choice(ReferralStatus.values)
+    reward_status = multi_choice(ReferralRewardStatus.values)
+    risk = multi_choice(ReferralRisk.values)
     flagged = QueryBoolean()
+    day_range = "created"
 
 
 class DecisionInput(serializers.Serializer):
@@ -282,10 +299,7 @@ class RejectInput(DecisionInput):
     note = Text(
         min_length=3,
         max_length=300,
-        error_messages=dict.fromkeys(
-            ("required", "null", "blank", "invalid", "max_length", "min_length"),
-            "Add a note (up to 300 characters)",
-        ),
+        error_messages=dict.fromkeys(TEXT_ERRORS, "Add a note (up to 300 characters)"),
     )
 
 

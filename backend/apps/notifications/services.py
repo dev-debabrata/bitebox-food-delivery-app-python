@@ -16,8 +16,9 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Q, QuerySet
 from django.utils import timezone
 
 from apps.accounts.models import User, UserStatus
@@ -164,11 +165,18 @@ def _reachable(user: User, channel: str, with_browser: set[Any], with_app: set[A
     }[Channel(channel)]
 
 
+def admins_with(permission: Permission) -> list[User]:
+    """
+    Active admin-panel accounts whose *effective* permissions include `permission` (the super
+    admin always; others by their custom list, else their role preset).
+    """
+    admins = User.objects.filter(role__in=list(ADMIN_ROLES), status=UserStatus.ACTIVE)
+    return [u for u in admins.order_by("name", "id") if has_permission(u, permission)]
+
+
 def notify_admins(permission: Permission, **payload: Any) -> None:
-    """The super admin plus every admin role holding `permission` (active accounts only)."""
-    roles = [r for r in ADMIN_ROLES if r == Role.ADMIN or has_permission(r, permission)]
-    ids = User.objects.filter(role__in=roles, status=UserStatus.ACTIVE).values_list("id", flat=True)
-    notify(list(ids), **payload)
+    """The super admin plus every admin holding `permission` (active accounts only)."""
+    notify([u.pk for u in admins_with(permission)], **payload)
 
 
 # ---------------------------------------------------------------------------
@@ -194,18 +202,18 @@ def attempt(delivery_id: Any, now: datetime | None = None) -> str | None:
         senders.sender_for(delivery.channel)(delivery)
     except senders.Skip as reason:
         fields.update(status=D.SKIPPED, last_error=str(reason)[:500], next_attempt_at=None)
-    except senders.PermanentFailure as error:
-        fields.update(status=D.DEAD, last_error=str(error)[:500], next_attempt_at=None)
-        logger.error("Notification dead letter", extra={"delivery": str(delivery.pk)})
     except Exception as error:
-        message = f"{type(error).__name__}: {error}"[:500]
-        if tries >= MAX_ATTEMPTS:
-            fields.update(status=D.DEAD, last_error=message, next_attempt_at=None)
+        permanent = isinstance(error, senders.PermanentFailure)
+        message = str(error) if permanent else f"{type(error).__name__}: {error}"
+        if permanent or tries >= MAX_ATTEMPTS:
+            fields.update(status=D.DEAD, last_error=message[:500], next_attempt_at=None)
             logger.error("Notification dead letter", extra={"delivery": str(delivery.pk)})
         else:
             wait = BACKOFF_SECONDS[min(tries, len(BACKOFF_SECONDS)) - 1]
             fields.update(
-                status=D.FAILED, last_error=message, next_attempt_at=now + timedelta(seconds=wait)
+                status=D.FAILED,
+                last_error=message[:500],
+                next_attempt_at=now + timedelta(seconds=wait),
             )
     else:
         fields.update(status=D.SENT, sent_at=timezone.now(), last_error="", next_attempt_at=None)
@@ -297,10 +305,14 @@ def _categories(user: User) -> list[str]:
     return list(content.CATEGORIES) if user.role == Role.CUSTOMER else ["orders", "account"]
 
 
+def _switches(source: Any, channel: str) -> dict[str, bool]:
+    return {c: getattr(source, f"{channel}_{c}") for c in content.CATEGORIES}
+
+
 def push_preferences(user: User) -> dict[str, Any]:
     """GET /push/preferences (Node parity)."""
     return {
-        "preferences": {c: getattr(user, f"push_{c}") for c in content.CATEGORIES},
+        "preferences": _switches(user, "push"),
         "categories": _categories(user),
         "devices": PushSubscription.objects.filter(user=user).count(),
         "enabled": senders.push_enabled(),
@@ -320,9 +332,9 @@ def channel_preferences(user: User) -> dict[str, Any]:
     prefs = _channel_prefs(user)
     return {
         "channels": {
-            "push": {c: getattr(user, f"push_{c}") for c in content.CATEGORIES},
-            "email": {c: getattr(prefs, f"email_{c}") for c in content.CATEGORIES},
-            "sms": {c: getattr(prefs, f"sms_{c}") for c in content.CATEGORIES},
+            "push": _switches(user, "push"),
+            "email": _switches(prefs, "email"),
+            "sms": _switches(prefs, "sms"),
         },
         "categories": _categories(user),
         "available": {
@@ -378,14 +390,18 @@ def device_label(user_agent: str) -> str:
     return f"{browser} on {system}" if system else browser
 
 
+def _keep_newest(devices: QuerySet[Any]) -> None:
+    """Forgets all but a person's MAX_DEVICES_PER_USER most recently used browsers or apps."""
+    stale = devices.order_by("-updated_at")[MAX_DEVICES_PER_USER:]
+    devices.model.objects.filter(pk__in=list(stale.values_list("pk", flat=True))).delete()
+
+
 def _push_unavailable() -> ApiError:
     return ApiError(503, "Push notifications are not available right now", code="PUSH_UNAVAILABLE")
 
 
 def public_config() -> dict[str, Any]:
     """What the browser needs to subscribe. Only the public key is ever exposed."""
-    from django.conf import settings
-
     return {"enabled": senders.push_enabled(), "public_key": settings.VAPID_PUBLIC_KEY or None}
 
 
@@ -417,10 +433,7 @@ def subscribe(user: User, data: dict[str, Any], user_agent: str) -> dict[str, An
     except IntegrityError:  # two first subscriptions of one browser at once: update instead
         sub, created = PushSubscription.objects.update_or_create(endpoint=endpoint, defaults=fields)
     if created:  # keep only the newest few browsers per person
-        stale = PushSubscription.objects.filter(user=user).order_by("-updated_at")[
-            MAX_DEVICES_PER_USER:
-        ]
-        PushSubscription.objects.filter(pk__in=list(stale.values_list("pk", flat=True))).delete()
+        _keep_newest(PushSubscription.objects.filter(user=user))
     return {
         "subscription": {
             "id": str(sub.pk),
@@ -473,8 +486,7 @@ def register_device(user: User, token: str, platform: str) -> dict[str, Any]:
     device, _ = DeviceToken.objects.update_or_create(
         token=token, defaults={"user": user, "platform": platform, "failures": 0}
     )
-    stale = DeviceToken.objects.filter(user=user).order_by("-updated_at")[MAX_DEVICES_PER_USER:]
-    DeviceToken.objects.filter(pk__in=list(stale.values_list("pk", flat=True))).delete()
+    _keep_newest(DeviceToken.objects.filter(user=user))
     return {"device": {"id": str(device.pk), "platform": device.platform}}
 
 

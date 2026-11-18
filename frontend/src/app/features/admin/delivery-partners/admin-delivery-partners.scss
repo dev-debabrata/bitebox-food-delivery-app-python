@@ -1,16 +1,5 @@
 @use 'breakpoints' as bp;
 
-.filters {
-  display: grid;
-  gap: var(--bb-space-3);
-  align-items: center;
-  margin-bottom: var(--bb-space-4);
-
-  @include bp.tablet-up {
-    grid-template-columns: minmax(0, 1fr) 200px auto;
-  }
-}
-
 .list-card {
   padding: 0;
   overflow: hidden;
@@ -106,6 +95,20 @@
   span {
     font-size: 0.85rem;
     overflow-wrap: anywhere;
+  }
+
+  // The name with its verification status beside it (the badge only as wide as its text).
+  .title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px var(--bb-space-2);
+    font-size: inherit;
+  }
+
+  .bb-badge {
+    flex: none;
+    white-space: nowrap;
   }
 }
 

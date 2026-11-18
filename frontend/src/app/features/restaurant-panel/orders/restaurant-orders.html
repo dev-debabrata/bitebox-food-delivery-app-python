@@ -2,7 +2,13 @@
   title="Orders"
   subtitle="Accept new orders quickly: unanswered ones are rejected automatically."
 >
-  <np-button severity="primary" variant="outlined" icon="refresh-cw" label="Refresh" (clicked)="board.refresh()" />
+  <np-button
+    severity="primary"
+    variant="outlined"
+    icon="refresh-cw"
+    label="Refresh"
+    (clicked)="board.refresh()"
+  />
 </bb-page-header>
 
 @if (board.noRestaurant()) {
@@ -34,52 +40,59 @@
   }
 
   @if (tab() === 'history') {
-    @if (history.loading() && !history.data()) {
-      <span class="bb-skeleton" style="height: 240px"></span>
-    } @else if (history.error(); as message) {
+    <bb-list-toolbar
+      [list]="history"
+      [sections]="historySections"
+      searchLabel="Search order history"
+      placeholder="Order number or customer name"
+    />
+    @if (historyList.error(); as message) {
       <div class="bb-alert error" role="alert">
         <np-icon name="circle-alert" class="mat-icon" matButtonIcon />
         <span
           >{{ message }}
-          <button class="bb-link-button" (click)="history.load(1)">Retry</button></span
+          <button class="bb-link-button" (click)="historyList.load(1)">Retry</button></span
         >
       </div>
-    } @else if (history.data(); as h) {
-      @if (h.items.length === 0) {
-        <bb-empty-state
-          icon="history"
-          title="No finished orders yet"
-          message="Delivered, rejected and cancelled orders appear here."
-        />
-      } @else {
-        <ul class="history bb-card">
-          @for (o of h.items; track o.id) {
-            <li>
-              <div class="h-main">
-                <strong>{{ o.orderNumber }}</strong>
-                <span class="bb-muted"
-                  >{{ o.createdAt | date: 'd MMM, h:mm a' }} · {{ o | itemCount }} ·
-                  {{ o.deliveryAddress.recipientName }}</span
-                >
-                @if (o.cancellation?.reason) {
-                  <span class="reason">{{ o.cancellation!.reason }}</span>
-                }
-              </div>
-              <span class="h-total">{{ o.pricing.totalPaise | inr }}</span>
-              <bb-order-status-chip [status]="o.status" />
-            </li>
-          }
-        </ul>
-        <np-pagination
-          [page]="h.pagination.page"
-          [rows]="h.pagination.limit"
-          [totalRecords]="h.pagination.total"
-          [rowsOptions]="[15, 30, 50]"
-          variant="compact"
-          (pageChange)="history.goTo($event)"
-          (rowsChange)="history.goTo(1, $event)"
-        />
-      }
+    }
+    @if (historyList.showSkeleton()) {
+      <span class="bb-skeleton" style="height: 240px"></span>
+    } @else if (historyList.empty()) {
+      <bb-list-empty
+        [list]="history"
+        icon="history"
+        title="No finished orders yet"
+        message="Delivered, rejected and cancelled orders appear here."
+        noMatch="No orders match these filters"
+      />
+    } @else if (historyList.data(); as h) {
+      <ul class="history bb-card" [class.bb-dim]="historyList.loading()" [attr.aria-busy]="historyList.loading()">
+        @for (o of h.items; track o.id) {
+          <li>
+            <div class="h-main">
+              <strong>{{ o.orderNumber }}</strong>
+              <span class="bb-muted"
+                >{{ o.createdAt | date: 'd MMM, h:mm a' }} · {{ o | itemCount }} ·
+                {{ o.deliveryAddress.recipientName }}</span
+              >
+              @if (o.cancellation?.reason) {
+                <span class="reason">{{ o.cancellation!.reason }}</span>
+              }
+            </div>
+            <span class="h-total">{{ o.pricing.totalPaise | inr }}</span>
+            <bb-order-status-chip [status]="o.status" />
+          </li>
+        }
+      </ul>
+      <np-pagination
+        [page]="h.pagination.page"
+        [rows]="h.pagination.limit"
+        [totalRecords]="h.pagination.total"
+        [rowsOptions]="[15, 30, 50]"
+        variant="compact"
+        (pageChange)="historyList.goTo($event)"
+        (rowsChange)="historyList.goTo(1, $event)"
+      />
     }
   } @else if (!board.board()) {
     <div class="grid">
@@ -115,6 +128,7 @@
       @for (o of shown(); track o.id) {
         <article
           class="bb-card order"
+          [attr.data-status]="o.status"
           [class.urgent]="o.status === 'pending' && minutesLeft(o) <= 3"
           [attr.aria-labelledby]="'order-' + o.id"
         >
@@ -148,21 +162,24 @@
             @for (item of o.items; track item.foodItem) {
               <li>
                 <bb-veg-badge [veg]="item.isVeg" />
-                <span class="qty">{{ item.quantity }} ×</span>
+                <span class="qty">{{ item.quantity }}×</span>
                 <span>{{ item.name }}</span>
               </li>
             }
           </ul>
 
           @if (o.note) {
-            <p class="note"><np-icon name="sticky-note" class="mat-icon" matButtonIcon />{{ o.note }}</p>
+            <p class="note">
+              <np-icon name="sticky-note" class="mat-icon" matButtonIcon />{{ o.note }}
+            </p>
           }
 
           <div class="total">
-            @let isPaid = o.paymentMethod === 'online' || o.paymentStatus === 'paid';
-            <span>
-              {{ o | itemCount }} ·
-              <span [class.pay-paid]="isPaid">{{ isPaid ? 'Paid online' : 'Cash on delivery' }}</span>
+            @let cash = collectsCash(o);
+            <span class="bb-muted">{{ o | itemCount }}</span>
+            <span class="bb-badge pay" [class]="cash ? 'tone-warn' : 'tone-good'">
+              <np-icon [name]="cash ? 'banknote' : 'circle-check'" class="mat-icon" matButtonIcon />
+              {{ cash ? 'Cash on delivery' : 'Paid online' }}
             </span>
             <strong>{{ o.pricing.totalPaise | inr }}</strong>
           </div>
@@ -205,7 +222,11 @@
             </div>
           } @else {
             <p class="waiting">
-              <np-icon [name]="(o.riderAssigned ? 'two_wheeler' : 'hourglass_top') | npIcon" class="mat-icon" matButtonIcon />
+              <np-icon
+                [name]="(o.riderAssigned ? 'two_wheeler' : 'hourglass_top') | npIcon"
+                class="mat-icon"
+                matButtonIcon
+              />
               @switch (o.status) {
                 @case ('ready_for_pickup') {
                   Looking for a nearby rider…
@@ -219,7 +240,10 @@
               }
             </p>
             @if (o.pickupBy) {
-              <p class="bb-muted pickup-by">Cancelled automatically at {{ o.pickupBy | date: 'h:mm a' }} if no rider picks it up.</p>
+              <p class="bb-muted pickup-by">
+                Cancelled automatically at {{ o.pickupBy | date: 'h:mm a' }} if no rider picks it
+                up.
+              </p>
             }
           }
         </article>

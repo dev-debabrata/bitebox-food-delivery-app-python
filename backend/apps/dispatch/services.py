@@ -21,14 +21,14 @@ from django.db.models.functions import Floor
 from django.utils import timezone
 
 from apps.accounts.models import User, UserStatus
-from apps.delivery.models import DeliveryPartner
+from apps.delivery.models import AvailabilitySource, DeliveryPartner
+from apps.delivery.services import log_availability
 from apps.orders import presenters
 from apps.orders.models import Order, OrderStatus, OrderStatusHistory, PaymentMethod
 from apps.orders.notifications import notify_offer
 from apps.orders.workflow import Actor, transition
 from apps.realtime.events import emit_order_updated
 from common.api import ApiError
-from common.geo import GeoPoint
 from common.geo_sql import Distance, DWithin, point_sql
 
 from .config import DISPATCH, DISTANCE_BAND_M
@@ -38,6 +38,7 @@ logger = logging.getLogger("bitebox.dispatch")
 
 S = OrderStatus
 OFFERED = AssignmentStatus.OFFERED
+MISSED_OFFER_REASON = "Did not answer a delivery offer"
 
 
 def free_riders(now: datetime) -> QuerySet[DeliveryPartner]:
@@ -65,14 +66,6 @@ def waiting_orders(limit: int) -> list[Order]:
     )
 
 
-def _pickup_point(order: Order) -> GeoPoint | None:
-    location = (order.restaurant_snapshot or {}).get("location") or {}
-    coordinates = location.get("coordinates")
-    if not coordinates:
-        return None
-    return GeoPoint(lat=coordinates[1], lng=coordinates[0])
-
-
 def dispatch(order_id: uuid.UUID, now: datetime | None = None) -> uuid.UUID | None:
     """Offers the order to the best free rider. Returns that rider's user id, or None."""
     now = now or timezone.now()
@@ -81,7 +74,7 @@ def dispatch(order_id: uuid.UUID, now: datetime | None = None) -> uuid.UUID | No
         .exclude(_has_open_offer())
         .first()
     )
-    point = _pickup_point(order) if order else None
+    point = presenters.restaurant_point(order.restaurant_snapshot) if order else None
     if order is None or point is None:
         return None
 
@@ -234,9 +227,17 @@ def sweep(now: datetime | None = None) -> dict[str, int]:
             )
             if not cleared:
                 continue
-            DeliveryPartner.objects.filter(
+            rider = DeliveryPartner.objects.filter(
                 user_id=offer.rider_id, current_offer_id=offer.order_id
-            ).update(current_offer=None, is_online=False, updated_at=now)
+            )
+            if rider.filter(is_online=True).update(
+                current_offer=None, is_online=False, updated_at=now
+            ):
+                log_availability(
+                    offer.rider_id, False, AvailabilitySource.SYSTEM, MISSED_OFFER_REASON
+                )
+            else:
+                rider.update(current_offer=None, updated_at=now)
             summary["expired_offers"] += 1
             emit_order_updated(offer.order, also_notify=[offer.rider_id])
 

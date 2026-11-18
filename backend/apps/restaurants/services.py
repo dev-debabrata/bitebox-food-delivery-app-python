@@ -6,16 +6,19 @@ from typing import Any
 from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import Count, F, Q, QuerySet
+from django.db.models.expressions import RawSQL
 from django.db.models.fields import TextField
 from django.db.models.functions import Cast
 from django.utils import timezone
 
+from apps.accounts.admin_services import joined_between
 from apps.accounts.models import User
 from apps.kyc import services as kyc
 from apps.menus.models import FoodItem
 from apps.notifications.services import notify, notify_admins
 from apps.rbac.roles import Permission
 from common.api import ApiError
+from common.filters import Facet, apply_facets, with_facets
 from common.geo import GeoPoint
 from common.geo_sql import Distance, DWithin, point_sql
 from common.pagination import Page, paginate
@@ -85,13 +88,14 @@ def _apply(restaurant: Restaurant, data: dict[str, Any]) -> None:
         restaurant.location = GeoPoint(lat=location["latitude"], lng=location["longitude"])
 
 
-def _review_request(r: Restaurant, title: str, body: str) -> dict[str, str]:
-    return {
-        "type": "restaurant.review",
-        "title": f"{title}: {r.name}",
-        "body": body,
-        "link": f"/admin/restaurants/{r.pk}",
-    }
+def _ask_for_review(r: Restaurant, title: str, body: str) -> None:
+    notify_admins(
+        Permission.RESTAURANTS_MANAGE,
+        type="restaurant.review",
+        title=f"{title}: {r.name}",
+        body=body,
+        link=f"/admin/restaurants/{r.pk}",
+    )
 
 
 def own_restaurant(owner: User) -> Restaurant | None:
@@ -112,69 +116,110 @@ def create_own(owner: User, data: dict[str, Any]) -> Restaurant:
     _apply(restaurant, data)
     restaurant.slug = unique_slug(Restaurant, data["name"])
     restaurant.save()
-    notify_admins(
-        Permission.RESTAURANTS_MANAGE,
-        **_review_request(
-            restaurant, "New restaurant application", "Review it to put it live on BiteBox."
-        ),
+    _ask_for_review(
+        restaurant, "New restaurant application", "Review it to put it live on BiteBox."
     )
     return restaurant
 
 
-def update_own(owner: User, data: dict[str, Any]) -> Restaurant:
-    restaurant = require_own_restaurant(owner)
+def apply_update(restaurant: Restaurant, data: dict[str, Any]) -> None:
+    """Sets the partner-editable fields (RestaurantInput, partial) without saving; a new name
+    gets a new slug. Shared by the partner's own edit and the admin's (restaurant accounts)."""
     old_name = restaurant.name
     _apply(restaurant, data)
     if data.get("name") and data["name"] != old_name:
         restaurant.slug = unique_slug(Restaurant, data["name"], restaurant.pk)
+
+
+def update_own(owner: User, data: dict[str, Any]) -> Restaurant:
+    restaurant = require_own_restaurant(owner)
+    apply_update(restaurant, data)
     resubmitted = restaurant.status == RestaurantStatus.REJECTED
     if resubmitted:  # editing a rejected application sends it back for review
         restaurant.status = RestaurantStatus.PENDING
         restaurant.status_reason = ""
     restaurant.save()
     if resubmitted:
-        notify_admins(
-            Permission.RESTAURANTS_MANAGE,
-            **_review_request(
-                restaurant, "Restaurant resubmitted", "The owner updated a rejected application."
-            ),
+        _ask_for_review(
+            restaurant, "Restaurant resubmitted", "The owner updated a rejected application."
         )
     return restaurant
 
 
 def set_accepting_orders(owner: User, accepting: bool) -> Restaurant:
     restaurant = require_own_restaurant(owner)
-    restaurant.is_accepting_orders = accepting
-    restaurant.save(update_fields=["is_accepting_orders", "updated_at"])
+    set_accepting(restaurant, accepting)
     return restaurant
 
 
+def set_accepting(restaurant: Restaurant, accepting: bool) -> None:
+    """Open or pause new orders (the partner's toggle; admins may close it too)."""
+    restaurant.is_accepting_orders = accepting
+    restaurant.save(update_fields=["is_accepting_orders", "updated_at"])
+
+
 def owner_stats(restaurant: Restaurant) -> dict[str, int]:
-    items = FoodItem.objects.filter(restaurant=restaurant, deleted_at__isnull=True)
-    return {
-        "total_items": items.count(),
-        "available_items": items.filter(is_available=True).count(),
-        "categories_used": items.values("category").distinct().count(),
-    }
+    return FoodItem.objects.filter(restaurant=restaurant, deleted_at__isnull=True).aggregate(
+        total_items=Count("id"),
+        available_items=Count("id", filter=Q(is_available=True)),
+        categories_used=Count("category", distinct=True),
+    )
 
 
 # --- admin ----------------------------------------------------------------------------------------
 
 
-def _text_search(qs: QuerySet[Restaurant], search: str) -> QuerySet[Restaurant]:
+TABLE = connection.ops.quote_name(Restaurant._meta.db_table)
+
+
+def _text_search(qs: QuerySet[Restaurant], search: str, also: Q) -> QuerySet[Restaurant]:
+    """Name or any cuisine contains `search`, or `also` matches."""
     return qs.annotate(_cuisines=Cast("cuisines", TextField())).filter(
-        Q(name__icontains=search) | Q(city__icontains=search) | Q(_cuisines__icontains=search)
+        Q(name__icontains=search) | Q(_cuisines__icontains=search) | also
     )
 
 
-def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
-    qs = Restaurant.objects.select_related("owner").order_by("-created_at")
-    if query.get("status"):
-        qs = qs.filter(status=query["status"])
+VEG = {"pure_veg": Q(is_pure_veg=True), "mixed": Q(is_pure_veg=False)}
+ACCEPTING = {"open": Q(is_accepting_orders=True), "closed": Q(is_accepting_orders=False)}
+# Facets (and filters) shared with the restaurant accounts list (accounts.FACETS).
+STATUS_FACET = Facet("status", values=RestaurantStatus.values)
+CITY_FACET = Facet("city", ignore_case=True)  # the cities that occur, by count
+
+
+def _cuisine_any(values: list[str]) -> Q:
+    """Restaurants with any of the cuisines (each trimmed, any letter case)."""
+    matching = RawSQL(  # noqa: S611 (the values are a bound parameter)
+        f"SELECT r.id FROM {TABLE} r "  # noqa: S608 (table name)
+        "CROSS JOIN LATERAL jsonb_array_elements_text(r.cuisines) c(value) "
+        "WHERE lower(btrim(c.value)) = ANY(SELECT lower(btrim(v)) FROM unnest(%s::text[]) v)",
+        (values,),
+    )
+    return Q(pk__in=matching)
+
+
+ADMIN_FACETS = (
+    STATUS_FACET,
+    CITY_FACET,
+    # Each cuisine that occurs; a restaurant counts once under each of its cuisines.
+    Facet("cuisine", field="cuisines", elements=True, ignore_case=True, match=_cuisine_any),
+    Facet("veg", values=list(VEG), cases=VEG),
+    Facet("accepting", values=list(ACCEPTING), cases=ACCEPTING),
+)
+
+
+def _admin_restaurants(query: dict[str, Any]) -> QuerySet[Restaurant]:
+    """The restaurants matching the filters (ADMIN_FACETS, joined days, `search`)."""
+    qs = apply_facets(Restaurant.objects.select_related("owner"), query, ADMIN_FACETS)
+    qs = qs.filter(joined_between(query))
     if search := (query.get("search") or "").strip():
-        qs = _text_search(qs, search)
-    items, meta = paginate(qs, page)
-    return {"items": [restaurant_json(r, owner="admin") for r in items], "pagination": meta}
+        qs = _text_search(qs, search, Q(city__icontains=search))
+    return qs
+
+
+def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
+    items, meta = paginate(_admin_restaurants(query).order_by("-created_at"), page)
+    result = {"items": [restaurant_json(r, owner="admin") for r in items], "pagination": meta}
+    return with_facets(result, query, _admin_restaurants, ADMIN_FACETS)
 
 
 def admin_get(restaurant_id: uuid.UUID) -> Restaurant:
@@ -250,18 +295,12 @@ def resubmit(owner: User) -> Restaurant:
         raise ApiError.conflict("Your restaurant is not waiting for changes")
     restaurant.status, restaurant.status_reason = RestaurantStatus.PENDING, ""
     restaurant.save(update_fields=["status", "status_reason", "updated_at"])
-    notify_admins(
-        Permission.RESTAURANTS_MANAGE,
-        **_review_request(
-            restaurant, "Restaurant resubmitted", "The owner sent it for review again."
-        ),
-    )
+    _ask_for_review(restaurant, "Restaurant resubmitted", "The owner sent it for review again.")
     return restaurant
 
 
 # --- public ---------------------------------------------------------------------------------------
 
-TABLE = connection.ops.quote_name(Restaurant._meta.db_table)
 CUISINE_MATCH_SQL = (
     f"EXISTS (SELECT 1 FROM jsonb_array_elements_text({TABLE}.cuisines) c "  # noqa: S608 (table name)
     "WHERE lower(c) = lower(%s))"
@@ -283,9 +322,7 @@ def list_public(query: dict[str, Any], page: Page) -> dict[str, Any]:
         dish_restaurants = FoodItem.objects.filter(
             name__icontains=search, deleted_at__isnull=True
         ).values("restaurant_id")
-        qs = qs.annotate(_cuisines=Cast("cuisines", TextField())).filter(
-            Q(name__icontains=search) | Q(_cuisines__icontains=search) | Q(id__in=dish_restaurants)
-        )
+        qs = _text_search(qs, search, Q(id__in=dish_restaurants))
     if cuisine := (query.get("cuisine") or "").strip():
         # One of the cuisines equals it, ignoring case (Node: cuisines: /^x$/i).
         qs = qs.extra(  # noqa: S610 (the value is a bound parameter)
@@ -312,11 +349,16 @@ def list_public(query: dict[str, Any], page: Page) -> dict[str, Any]:
         )
 
     items, meta = paginate(qs.order_by(*SORTS[sort]), page)
+    # Each card's offer badge: the restaurant's best live offer (apps/coupons imports this module).
+    from apps.coupons.services import best_offers
+
+    offers = best_offers(r.pk for r in items)
     return {
         "items": [
-            restaurant_json(
-                r, owner="public", distance_m=getattr(r, "distance_m", None) if geo else None
-            )
+            {
+                **restaurant_json(r, owner="public", distance_m=getattr(r, "distance_m", None)),
+                "offer": offers.get(str(r.pk)),
+            }
             for r in items
         ],
         "pagination": meta,

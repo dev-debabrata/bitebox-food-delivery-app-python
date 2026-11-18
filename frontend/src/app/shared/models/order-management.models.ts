@@ -1,4 +1,5 @@
 import { RatingSummary } from './review.models';
+import { FilterPreview } from '../components/filter-panel/filter-panel.models';
 import { Pagination } from './api.models';
 import { Order, OrderStatus, RiderCard, VehicleType } from './checkout.models';
 
@@ -40,6 +41,8 @@ export interface RestaurantActiveOrders {
 export interface RestaurantOrderHistory {
   items: RestaurantOrder[];
   pagination: Pagination;
+  /** With `facets: 1`: the Filters panel's counts. */
+  facets?: FilterPreview['facets'];
 }
 
 export type RestaurantAction = 'confirmed' | 'rejected' | 'preparing' | 'ready_for_pickup';
@@ -47,21 +50,34 @@ export type RestaurantAction = 'confirmed' | 'rejected' | 'preparing' | 'ready_f
 // Rider
 /** `resubmission_requested`: BiteBox asked for documents again. Riders go online once approved. */
 export type RiderVerificationStatus = 'pending' | 'approved' | 'rejected' | 'resubmission_requested';
+/**
+ * What people see: a pending rider who has not sent everything yet (documents, bank account,
+ * address, vehicle; the API's `submitted`) is "not submitted", not "in review".
+ */
+export type RiderReviewState = RiderVerificationStatus | 'not_submitted';
 
-export const RIDER_VERIFICATION_LABEL: Record<RiderVerificationStatus, string> = {
+export const riderReviewState = (v: {
+  status: RiderVerificationStatus;
+  submitted?: boolean;
+}): RiderReviewState => (v.status === 'pending' && v.submitted === false ? 'not_submitted' : v.status);
+
+export const RIDER_VERIFICATION_LABEL: Record<RiderReviewState, string> = {
+  not_submitted: 'Not submitted',
   pending: 'In review',
   approved: 'Verified',
   rejected: 'Not approved',
   resubmission_requested: 'Documents needed',
 };
 /** What the rider is told on the dashboard and the Verification page. */
-export const RIDER_VERIFICATION_COPY: Record<RiderVerificationStatus, string> = {
-  pending: 'Upload your documents: you can go online once BiteBox verifies them.',
+export const RIDER_VERIFICATION_COPY: Record<RiderReviewState, string> = {
+  not_submitted: 'Upload your documents: you can go online once BiteBox verifies them.',
+  pending: 'BiteBox is checking your documents. You can go online once they are approved.',
   approved: 'You are verified. Keep your documents up to date.',
   rejected: 'Your verification was not approved. Fix what is asked, then send it again.',
   resubmission_requested: 'BiteBox needs updated documents before you can go online.',
 };
-export const RIDER_VERIFICATION_TONE: Record<RiderVerificationStatus, string> = {
+export const RIDER_VERIFICATION_TONE: Record<RiderReviewState, string> = {
+  not_submitted: 'tone-neutral',
   pending: 'tone-warn',
   approved: 'tone-good',
   rejected: 'tone-bad',
@@ -86,7 +102,13 @@ export interface RiderProfile {
   completedDeliveries: number;
   rating?: RatingSummary;
   address?: RiderAddress | null;
-  verification?: { status: RiderVerificationStatus; reason: string | null; verifiedAt: string | null };
+  verification?: {
+    status: RiderVerificationStatus;
+    reason: string | null;
+    verifiedAt: string | null;
+    /** Everything an admin checks has been sent (absent from older APIs). */
+    submitted?: boolean;
+  };
 }
 
 export interface RiderOrder extends Omit<Order, 'deliveryAddress' | 'rider' | 'cancellation'> {
@@ -104,6 +126,10 @@ export interface RiderOrder extends Omit<Order, 'deliveryAddress' | 'rider' | 'c
   /** "Delivered" needs the customer's 4-digit code (Django API). */
   deliveryOtpRequired?: boolean;
 }
+
+/** True when the rider must collect the total in cash at the door (cash on delivery, not yet paid). */
+export const collectsCash = (o: Pick<Order, 'paymentMethod' | 'paymentStatus'>): boolean =>
+  o.paymentMethod === 'cod' && o.paymentStatus !== 'paid';
 
 /** GET /delivery/stats (Django API only). Money in paise. */
 export interface RiderStats {
@@ -155,6 +181,7 @@ export interface AdminRider {
   rating: RatingSummary | null;
   activeOrder: { id: string; orderNumber: string; status: OrderStatus } | null;
   verificationStatus?: RiderVerificationStatus;
+  submitted?: boolean;
 }
 
 /** GET /admin/delivery-partners/{id}. */

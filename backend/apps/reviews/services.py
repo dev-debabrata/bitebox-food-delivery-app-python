@@ -4,12 +4,14 @@ editing, deleting, reporting), the public lists, the restaurant panel and the ri
 Admin moderation and analytics are in `moderation.py`.
 """
 
+import functools
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
 from django.db import IntegrityError, transaction
-from django.db.models import Avg, Count, Max, Min, QuerySet, Sum
+from django.db.models import Avg, Count, Max, Min, Q, QuerySet, Sum
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -23,6 +25,7 @@ from apps.rbac.roles import Permission, Role
 from apps.restaurants.models import Restaurant
 from apps.restaurants.presenters import rating_json
 from common.api import ApiError
+from common.filters import Facet, apply_facets, days_between, text_search, with_facets
 from common.pagination import Page, paginate
 
 from . import rewards
@@ -37,6 +40,7 @@ from .models import (
     ReviewStatus,
     ReviewTarget,
 )
+from .serializers import RATINGS, WITH_OR_WITHOUT
 
 T = ReviewTarget
 
@@ -50,6 +54,14 @@ def summarize(counts: dict[int, int]) -> dict[str, Any]:
     return {"average": average, "count": count, "distribution": distribution}
 
 
+# target → (the review's subject field, the subject model, its key for that id)
+SUBJECTS: dict[str, tuple[str, type[Any], str]] = {
+    T.RESTAURANT: ("restaurant_id", Restaurant, "pk"),
+    T.FOOD: ("food_item_id", FoodItem, "pk"),
+    T.RIDER: ("delivery_partner_id", DeliveryPartner, "user_id"),
+}
+
+
 def refresh_rating(target: str, subject_id: Any) -> dict[str, Any] | None:
     """
     Rebuilds a subject's cached rating from its published reviews (never by adding deltas), so it
@@ -57,12 +69,7 @@ def refresh_rating(target: str, subject_id: Any) -> dict[str, Any] | None:
     """
     if not subject_id:
         return None
-    subjects: dict[str, tuple[str, QuerySet[Any], str]] = {
-        T.RESTAURANT: ("restaurant_id", Restaurant.objects.all(), "pk"),
-        T.FOOD: ("food_item_id", FoodItem.objects.all(), "pk"),
-        T.RIDER: ("delivery_partner_id", DeliveryPartner.objects.all(), "user_id"),
-    }
-    field, subjects_qs, key = subjects[target]
+    field, model, key = SUBJECTS[target]
     rows = (
         Review.objects.filter(target=target, status=ReviewStatus.PUBLISHED, **{field: subject_id})
         .values("rating")
@@ -70,7 +77,7 @@ def refresh_rating(target: str, subject_id: Any) -> dict[str, Any] | None:
         .order_by()
     )
     rating = summarize({r["rating"]: r["n"] for r in rows})
-    subjects_qs.filter(**{key: subject_id}).update(
+    model.objects.filter(**{key: subject_id}).update(
         rating_average=rating["average"],
         rating_count=rating["count"],
         rating_distribution=rating["distribution"],
@@ -78,15 +85,8 @@ def refresh_rating(target: str, subject_id: Any) -> dict[str, Any] | None:
     return rating
 
 
-SUBJECT_FIELD: dict[str, str] = {
-    T.RESTAURANT: "restaurant_id",
-    T.FOOD: "food_item_id",
-    T.RIDER: "delivery_partner_id",
-}
-
-
 def refresh_for(review: Review) -> dict[str, Any] | None:
-    return refresh_rating(review.target, getattr(review, SUBJECT_FIELD[review.target]))
+    return refresh_rating(review.target, getattr(review, SUBJECTS[review.target][0]))
 
 
 def review_changed() -> ApiError:
@@ -219,9 +219,21 @@ def order_page(
         )
         .order_by(*GROUP_SORTS.get(sort or "newest", GROUP_SORTS["newest"]))
     )
-    total = groups.count()
-    ids = [g["order_id"] for g in groups[page.offset : page.offset + page.limit]]
-    return ids, page.meta(total)
+    rows, meta = paginate(groups, page)
+    return [g["order_id"] for g in rows], meta
+
+
+# A facet of a review list whose rows are orders (admin, restaurant): each option counts the
+# orders with a matching review (not the reviews).
+OrderFacet = functools.partial(Facet, per="order_id")
+
+
+def stars_facet(cls: Callable[..., Facet] = Facet) -> Facet:
+    """`rating`: whole stars ("1".."5"), each its own count."""
+    return cls("rating", values=RATINGS, cases={stars: Q(rating=int(stars)) for stars in RATINGS})
+
+
+REPLY_STATES = ["needed", "replied"]
 
 
 # ---------------------------------------------------------------------------
@@ -234,26 +246,46 @@ def _own_restaurant(owner: User) -> Restaurant:
     return restaurant
 
 
+# The restaurant review list's Filters panel (rows are orders).
+RESTAURANT_FACETS = (
+    OrderFacet("target", values=[T.RESTAURANT, T.FOOD]),
+    stars_facet(OrderFacet),
+    OrderFacet(
+        "reply",
+        values=REPLY_STATES,
+        cases={"needed": Q(response__isnull=True), "replied": Q(response__isnull=False)},
+    ),
+    OrderFacet(
+        "photos",
+        values=WITH_OR_WITHOUT,
+        cases={"with": ~Q(images=[]), "without": Q(images=[])},
+    ),
+    # The restaurant's dishes with reviews (id, name, orders).
+    OrderFacet("dish", field="food_item_id", label="food_item__name"),
+)
+
+
 def _restaurant_reviews(
     restaurant: Restaurant, query: dict[str, Any] | None = None
 ) -> QuerySet[Review]:
-    """What a restaurant may see: published reviews of it and its dishes, never the rider's."""
+    """What a restaurant may see: published reviews of it and its dishes, never the rider's;
+    narrowed by RESTAURANT_FACETS, the older single filters (foodItemId, responded), the day
+    written and a search over the order number, dish and words."""
     query = query or {}
-    qs = Review.objects.filter(restaurant=restaurant, status=ReviewStatus.PUBLISHED)
-    qs = (
-        qs.filter(target=query["target"])
-        if query.get("target")
-        else qs.filter(target__in=[T.RESTAURANT, T.FOOD])
+    qs = Review.objects.filter(
+        restaurant=restaurant,
+        status=ReviewStatus.PUBLISHED,
+        target__in=[T.RESTAURANT, T.FOOD],
     )
+    qs = apply_facets(qs, query, RESTAURANT_FACETS)
     if query.get("food_item_id"):
         qs = qs.filter(food_item_id=query["food_item_id"])
-    if query.get("rating"):
-        qs = qs.filter(rating=query["rating"])
     if query.get("responded") is True:
         qs = qs.filter(response__isnull=False)
     elif query.get("responded") is False:
         qs = qs.filter(response__isnull=True)
-    return qs
+    qs = qs.filter(days_between(query, "created"))
+    return qs.filter(text_search(query.get("search"), "order_number", "food_name", "comment"))
 
 
 def _restaurant_order_view(group: dict[str, Any], reported: set[str]) -> dict[str, Any]:
@@ -268,7 +300,8 @@ def _restaurant_order_view(group: dict[str, Any], reported: set[str]) -> dict[st
 
 
 def restaurant_orders(owner: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
-    """One row per order: its restaurant and dish reviews together."""
+    """One row per order: its restaurant and dish reviews together. `?facets=1` adds the Filters
+    panel's counts (orders), over this restaurant's reviews only."""
     restaurant = _own_restaurant(owner)
     order_ids, meta = order_page(_restaurant_reviews(restaurant, query), query.get("sort"), page)
     reviews = list(
@@ -276,7 +309,10 @@ def restaurant_orders(owner: User, query: dict[str, Any], page: Page) -> dict[st
     )
     reported = _reported_by(owner, reviews)
     items = [_restaurant_order_view(g, reported) for g in group_reviews(order_ids, reviews)]
-    return {"items": items, "pagination": meta}
+    result = {"items": items, "pagination": meta}
+    return with_facets(
+        result, query, lambda q: _restaurant_reviews(restaurant, q), RESTAURANT_FACETS
+    )
 
 
 def restaurant_order(owner: User, order_id: uuid.UUID) -> dict[str, Any]:
@@ -336,14 +372,17 @@ def respond(owner: User, review_id: uuid.UUID, text: str) -> dict[str, Any]:
             body=text[:140],
             link=f"/orders/{review.order_id}",
         )
-    fresh = Review.objects.select_related("response").get(pk=review.pk)
-    return present_for_restaurant(fresh, _reported_by(owner, [fresh]))
+    return _restaurant_view(owner, review.pk)
 
 
 def delete_response(owner: User, review_id: uuid.UUID) -> dict[str, Any]:
     _, review = _own_restaurant_review(owner, review_id)
     ReviewResponse.objects.filter(review=review).delete()
-    fresh = Review.objects.select_related("response").get(pk=review.pk)
+    return _restaurant_view(owner, review.pk)
+
+
+def _restaurant_view(owner: User, review_id: Any) -> dict[str, Any]:
+    fresh = Review.objects.select_related("response").get(pk=review_id)
     return present_for_restaurant(fresh, _reported_by(owner, [fresh]))
 
 
@@ -372,13 +411,29 @@ def present_for_rider(review: Review, reported: set[str]) -> dict[str, Any]:
     }
 
 
-def rider_list(user: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
+# The rider's ratings list's Filters panel (rows are reviews).
+RIDER_FACETS = (
+    stars_facet(),
+    Facet(
+        "comment",
+        values=WITH_OR_WITHOUT,
+        cases={"with": ~Q(comment=""), "without": Q(comment="")},
+    ),
+)
+
+
+def _rider_reviews(user: User, query: dict[str, Any]) -> QuerySet[Review]:
+    """The rider's own published ratings matching RIDER_FACETS, the day written and a search over
+    the order number and words."""
     qs = Review.objects.filter(target=T.RIDER, delivery_partner=user, status=ReviewStatus.PUBLISHED)
-    if query.get("rating"):
-        qs = qs.filter(rating=query["rating"])
-    qs = qs.order_by(*REVIEW_SORTS.get(query.get("sort") or "newest", REVIEW_SORTS["newest"]))
-    total = qs.count()
-    items = list(qs[page.offset : page.offset + page.limit])
+    qs = apply_facets(qs, query, RIDER_FACETS).filter(days_between(query, "created"))
+    return qs.filter(text_search(query.get("search"), "order_number", "comment"))
+
+
+def rider_list(user: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
+    """The rider's ratings (summary over all of them). `?facets=1` adds the Filters panel's
+    counts, over this rider's ratings only."""
+    items, meta = paginate(_sorted(_rider_reviews(user, query), query.get("sort")), page)
     profile = DeliveryPartner.objects.filter(user=user).first()
     summary = (
         rating_json(profile)
@@ -386,11 +441,12 @@ def rider_list(user: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
         else {"average": 0, "count": 0, "distribution": [0, 0, 0, 0, 0]}
     )
     reported = _reported_by(user, items)
-    return {
+    result = {
         "summary": summary,
         "items": [present_for_rider(r, reported) for r in items],
-        "pagination": page.meta(total),
+        "pagination": meta,
     }
+    return with_facets(result, query, lambda q: _rider_reviews(user, q), RIDER_FACETS)
 
 
 def _sorted(qs: QuerySet[Review], sort: str | None) -> QuerySet[Review]:
@@ -512,8 +568,9 @@ def _build_review(
     food_item_id: Any = None,
     comment: str | None = None,
     images: list[str] | None = None,
+    items: list[Any] | None = None,
 ) -> Review:
-    """The (unsaved) review of one part of an already loaded and checked order."""
+    """The (unsaved) review of one part of an already loaded and checked order (and its `items`)."""
     review = Review(
         target=target,
         customer=user,
@@ -526,9 +583,8 @@ def _build_review(
         images=list(images or []),
     )
     if target == T.FOOD:
-        line = next(
-            (i for i in _order_items(order) if str(i.food_item_id) == str(food_item_id)), None
-        )
+        lines = _order_items(order) if items is None else items
+        line = next((i for i in lines if str(i.food_item_id) == str(food_item_id)), None)
         if line is None:
             raise ApiError(
                 422,
@@ -612,6 +668,8 @@ def review_order(user: User, order_id: uuid.UUID, data: dict[str, Any]) -> dict[
     _assert_open(order)
     existing = list(Review.objects.filter(order=order).values_list("target", "food_item_id"))
 
+    items = _order_items(order)
+
     def done(target: str, food_item: Any = None) -> bool:
         return any(_same_subject(t, f, target, food_item) for t, f in existing)
 
@@ -621,7 +679,7 @@ def review_order(user: User, order_id: uuid.UUID, data: dict[str, Any]) -> dict[
         if rating is None:
             continue
         subjects: list[Any] = (
-            [i.food_item_id for i in _order_items(order) if not done(T.FOOD, i.food_item_id)]
+            [i.food_item_id for i in items if not done(T.FOOD, i.food_item_id)]
             if target == T.FOOD
             else ([] if done(target) else [None])
         )
@@ -637,6 +695,7 @@ def review_order(user: User, order_id: uuid.UUID, data: dict[str, Any]) -> dict[
                 food_item_id=subject,
                 comment=data.get("comment") if words else None,
                 images=data.get("images") if words else None,
+                items=items,
             )
             for subject in subjects
         )

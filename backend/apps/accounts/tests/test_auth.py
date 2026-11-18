@@ -387,6 +387,29 @@ def test_change_password_needs_the_current_one_and_signs_out_other_sessions(api:
     assert me(token).status_code == 401
 
 
+def test_a_new_password_must_differ_from_the_current_one(api: APIClient) -> None:
+    res, body = register(api)
+    same = APIClient().post(
+        "/api/v1/auth/change-password",
+        {"currentPassword": PASSWORD, "newPassword": PASSWORD},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {token_of(res)}",
+    )
+    assert same.status_code == 400
+    assert same.json()["error"]["details"][0]["field"] == "newPassword"
+    assert me(token_of(res)).status_code == 200  # nothing changed, still signed in
+
+    api.post("/api/v1/auth/forgot-password", {"email": body["email"]}, format="json")
+    token = token_from_email()
+    reset = lambda pw: api.post(  # noqa: E731
+        "/api/v1/auth/reset-password", {"token": token, "password": pw}, format="json"
+    )
+    refused = reset(PASSWORD)
+    assert refused.status_code == 400
+    assert refused.json()["error"]["details"][0]["field"] == "password"
+    assert reset("Brand-new-pass9").status_code == 200  # the link still works after a refusal
+
+
 # --- role authorization -------------------------------------------------------------------------
 
 
@@ -421,7 +444,9 @@ def test_admins_suspend_and_reactivate_a_user() -> None:
     as_admin = {"HTTP_AUTHORIZATION": f"Bearer {admin['token']}"}
     path = f"/api/v1/admin/users/{customer['user']['id']}/status"
 
-    off = APIClient().patch(path, {"status": "suspended"}, format="json", **as_admin)
+    off = APIClient().patch(
+        path, {"status": "suspended", "reason": "Policy review"}, format="json", **as_admin
+    )
     assert off.status_code == 200
     assert off.json()["data"]["user"]["status"] == "suspended"
     assert me(customer["token"]).status_code == 401
@@ -437,7 +462,7 @@ def test_admins_cannot_suspend_themselves() -> None:
     admin = create_and_login("admin")
     res = APIClient().patch(
         f"/api/v1/admin/users/{admin['user']['id']}/status",
-        {"status": "suspended"},
+        {"status": "suspended", "reason": "Policy review"},
         format="json",
         HTTP_AUTHORIZATION=f"Bearer {admin['token']}",
     )
@@ -449,7 +474,7 @@ def test_invalid_ids_are_422() -> None:
     admin = create_and_login("admin")
     res = APIClient().patch(
         "/api/v1/admin/users/not-an-id/status",
-        {"status": "suspended"},
+        {"status": "suspended", "reason": "Policy review"},
         format="json",
         HTTP_AUTHORIZATION=f"Bearer {admin['token']}",
     )

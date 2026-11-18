@@ -242,7 +242,7 @@
 <section id="app-download" class="bb-container section" aria-labelledby="app-download-title">
   <div class="app-download-banner">
     <div class="app-download-copy">
-      <span class="eyebrow dark">
+      <span class="eyebrow">
         <np-icon name="smartphone" class="mat-icon" matButtonIcon />
         BiteBox on your device
       </span>
@@ -272,19 +272,9 @@
       </div>
     </div>
 
-    <div class="app-download-art" aria-hidden="true">
-      <div class="art-card">
-        <img src="/icon-192.png" alt="" width="72" height="72" class="app-badge-img" />
-        <div class="art-info">
-          <strong>BiteBox App</strong>
-          <span>Free • All browsers</span>
-        </div>
-        <div class="devices-row">
-          <np-icon name="smartphone" title="Mobile" />
-          <np-icon name="tablet" title="Tablet" />
-          <np-icon name="monitor" title="Desktop" />
-        </div>
-      </div>
+    <!-- Desktops and tablets: scan to get the app on a phone (phones use the button above). -->
+    <div class="app-download-art">
+      <bb-app-qr />
     </div>
   </div>
 </section>

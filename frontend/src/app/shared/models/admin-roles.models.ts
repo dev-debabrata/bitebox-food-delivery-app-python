@@ -1,7 +1,7 @@
 import { Paginated, Pagination } from './api.models';
 import { OrderStatus, PaymentStatus } from './checkout.models';
 import { PaymentInfo, PaymentMethod } from './payment.models';
-import { AdminRole, StaffAdminRole, User, UserStatus } from './user.models';
+import { AdminRole, Permission, StaffAdminRole, User } from './user.models';
 
 // ---------------------------------------------------------------------------
 // Admin management and audit log
@@ -13,14 +13,15 @@ export interface StaffAdminInput {
   phone?: string;
   password: string;
   role: StaffAdminRole;
+  /** The person's own permissions; null (or absent) = the role's preset. */
+  permissions?: Permission[] | null;
 }
-export type StaffAdminUpdate = Partial<Pick<StaffAdminInput, 'name' | 'phone' | 'role'>>;
-export interface StaffQuery {
-  role?: AdminRole;
-  status?: UserStatus;
-  search?: string;
-  page?: number;
-  limit?: number;
+export type StaffAdminUpdate = Partial<Pick<StaffAdminInput, 'name' | 'phone' | 'role' | 'permissions'>>;
+
+/** GET /admin/admins/permissions: what a super admin can grant, and ready-made sets. */
+export interface PermissionCatalogue {
+  permissions: { key: Permission; label: string; group: string }[];
+  presets: { key: string; label: string; permissions: Permission[] }[];
 }
 
 export interface AuditEntry {
@@ -31,6 +32,12 @@ export interface AuditEntry {
   description: string;
   resourceType?: string;
   resourceId?: string;
+  /** The target account's kind, when the change was to an account. */
+  accountType?: 'customer' | 'restaurant' | 'delivery' | 'admin' | '';
+  /** What changed: `{ field: { from, to } }`. */
+  changes?: Record<string, { from: unknown; to: unknown }>;
+  reason?: string;
+  ip?: string | null;
   createdAt: string;
 }
 
@@ -358,6 +365,8 @@ export interface TicketQuery {
   requesterRole?: RequesterRole;
   type?: TicketType;
   assignee?: 'me' | 'unassigned';
+  /** Tickets one person raised (user id). */
+  requester?: string;
   search?: string;
   page?: number;
   limit?: number;
@@ -417,6 +426,7 @@ export const STAFF_ROLE_SUMMARY: Record<StaffAdminRole, string> = {
     'Transactions, refunds, restaurant and rider payouts, commission and financial reports. No order or account changes.',
   support_admin:
     'Support tickets from customers, restaurants and riders, review moderation, and read-only order details.',
+  operator: 'Nothing by default: only the permissions you tick for this person.',
 };
 
 /** GET /admin/dashboard (Django API only). Money only for roles with finance:view. */

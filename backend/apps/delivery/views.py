@@ -5,16 +5,17 @@
 
 from typing import Any
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.admin_services import STATUS_MESSAGES
 from apps.accounts.authentication import current_user
 from apps.accounts.models import UserStatus
-from apps.accounts.serializers import user_json
-from apps.audit.services import audited
+from apps.accounts.serializers import JoinedListQuery, StatusInput, user_json
+from apps.audit.services import audited, note
 from apps.dispatch import services as dispatch
 from apps.finance import reports
 from apps.finance.views import DaysQuery
@@ -23,8 +24,21 @@ from apps.orders.views import STATUS_MESSAGE
 from apps.rbac.roles import Permission, Role
 from apps.restaurants.serializers import RestaurantAddressInput
 from apps.reviews import services as review_services
+from apps.reviews.serializers import RATINGS, SORTS, WITH_OR_WITHOUT, RiderReviewQuery
 from common.api import ok
 from common.fields import QueryBoolean
+from common.filters import (
+    FACETS_PARAM,
+    MULTI_NOTE,
+    FacetQuery,
+    MultiIdField,
+    MultiValueField,
+    facets_page,
+    list_params,
+    multi_choice,
+    multi_param,
+    page_params,
+)
 from common.pagination import Page
 from common.permissions import permission_required, role_required
 from common.schema import envelope, errors
@@ -191,29 +205,34 @@ class RiderOrderStatusView(APIView):
         return ok(services.dashboard(user), message=STATUS_MESSAGE[data["status"]])
 
 
+class RiderHistoryQuery(FacetQuery, JoinedListQuery):
+    """GET /delivery/orders/history."""
+
+    status = multi_choice(orders.RIDER_HISTORY_STATUSES)
+    restaurant = MultiIdField()
+    day_range = "placed"
+
+
+RIDER_HISTORY_PAGE = facets_page("RiderHistoryPage", orders.RIDER_FACETS)
+
+
 class RiderHistoryView(APIView):
     permission_classes = RIDER
 
     @extend_schema(
-        tags=["Delivery"], parameters=[PageQuery], responses={200: RESULT, **errors(401, 403, 422)}
+        tags=["Delivery"],
+        description=MULTI_NOTE,
+        parameters=list_params(
+            "Order number (or part of it)",
+            multi_param("status", orders.RIDER_HISTORY_STATUSES),
+            multi_param("restaurant", description="Restaurant ids"),
+            days="placed",
+        ),
+        responses={200: RIDER_HISTORY_PAGE, **errors(401, 403, 422)},
     )
     def get(self, request: Request) -> Response:
-        query = validated(PageQuery, request.query_params)
-        return ok(orders.rider_history(current_user(request), Page.from_query(query)))
-
-
-class RiderReviewQuery(PageQuery):
-    rating = serializers.IntegerField(
-        required=False,
-        min_value=1,
-        max_value=5,
-        error_messages=dict.fromkeys(("invalid", "min_value", "max_value"), "Invalid value"),
-    )
-    sort = serializers.ChoiceField(
-        choices=["newest", "oldest", "highest", "lowest"],
-        required=False,
-        error_messages=dict.fromkeys(("invalid_choice", "null", "blank"), "Invalid value"),
-    )
+        query = validated(RiderHistoryQuery, request.query_params)
+        return ok(orders.rider_history(current_user(request), Page.from_query(query), query))
 
 
 class RiderReviewsView(APIView):
@@ -221,8 +240,21 @@ class RiderReviewsView(APIView):
 
     @extend_schema(
         tags=["Delivery"],
-        parameters=[RiderReviewQuery],
-        responses={200: envelope("RiderReviews"), **errors(401, 403, 422)},
+        parameters=list_params(
+            "Order number or words of the rating",
+            multi_param("rating", RATINGS, "Stars"),
+            multi_param("comment", WITH_OR_WITHOUT, "Ratings with or without words"),
+            OpenApiParameter("sort", str, enum=SORTS),
+            days="created",
+        ),
+        responses={
+            200: facets_page(
+                "RiderReviewPage",
+                review_services.RIDER_FACETS,
+                summary=serializers.JSONField(),
+            ),
+            **errors(401, 403, 422),
+        },
     )
     def get(self, request: Request) -> Response:
         query = validated(RiderReviewQuery, request.query_params)
@@ -255,9 +287,15 @@ class RiderStatsView(APIView):
 # ---------------------------------------------------------------------------
 # Admin
 # ---------------------------------------------------------------------------
-class AdminRiderQuery(PageQuery):
+class AdminRiderQuery(FacetQuery, PageQuery):
+    """GET /admin/delivery-partners: verification, availability, vehicleType and zone take
+    several values (the boolean `online` works as before)."""
+
     online = QueryBoolean()
-    verification = serializers.ChoiceField(choices=VerificationStatus.values, required=False)
+    verification = multi_choice(services.VERIFICATION_VALUES)
+    availability = multi_choice(services.AVAILABILITY_VALUES)
+    vehicle_type = multi_choice(VehicleType.values)
+    zone = MultiValueField(max_length=60)
 
 
 class AdminVerificationInput(serializers.Serializer):
@@ -275,16 +313,20 @@ class RiderDetailsInput(serializers.Serializer):
     address = RestaurantAddressInput()
 
 
-class AdminRiderStatusInput(serializers.Serializer):
+class AdminRiderStatusInput(StatusInput):
+    """Any account status; a reason (3-500 characters) unless reactivating."""
+
     status = serializers.ChoiceField(
         choices=UserStatus.values,
         error_messages=dict.fromkeys(
-            ("invalid_choice", "required", "null", "blank"), "Status must be active or suspended"
+            ("invalid_choice", "required", "null", "blank"),
+            "Status must be active, inactive, suspended or blocked",
         ),
     )
 
 
 RIDERS_ADMIN = [permission_required(Permission.RIDERS_MANAGE)]
+ADMIN_RIDER_PAGE = facets_page("AdminRiderPage", services.ADMIN_FACETS)
 
 
 class AdminRidersView(APIView):
@@ -292,8 +334,24 @@ class AdminRidersView(APIView):
 
     @extend_schema(
         tags=["Admin: delivery partners"],
-        parameters=[AdminRiderQuery],
-        responses={200: RESULT, **errors(401, 403, 422)},
+        parameters=[
+            *page_params("Name, email or phone (part of it)"),
+            OpenApiParameter("online", bool, description="true: online riders only"),
+            multi_param(
+                "verification",
+                services.VERIFICATION_VALUES,
+                "pending: in review; not_submitted: pending, documents not all sent",
+            ),
+            multi_param(
+                "availability",
+                services.AVAILABILITY_VALUES,
+                "online: online and free; busy: online with an order; offline",
+            ),
+            multi_param("vehicleType", VehicleType.values),
+            multi_param("zone", description="Each exact, any letter case"),
+            FACETS_PARAM,
+        ],
+        responses={200: ADMIN_RIDER_PAGE, **errors(401, 403, 422)},
     )
     def get(self, request: Request) -> Response:
         query = validated(AdminRiderQuery, request.query_params)
@@ -312,10 +370,11 @@ class AdminRiderStatusView(APIView):
     def patch(self, request: Request, id: str) -> Response:
         user_id = parse_id(id)
         data = validated(AdminRiderStatusInput, request.data)
-        user = services.admin_set_status(user_id, data["status"])
+        user, changes = services.admin_set_status(user_id, data["status"], data["reason"])
+        note(request, changes, reason=data["reason"])
         return ok(
             {"user": user_json(user)},
-            message="Rider reactivated" if user.status == UserStatus.ACTIVE else "Rider suspended",
+            message=f"Rider {STATUS_MESSAGES[UserStatus(user.status)]}",
         )
 
 

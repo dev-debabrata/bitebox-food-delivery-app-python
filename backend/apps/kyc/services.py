@@ -5,9 +5,24 @@ checklist of what each partner type needs, and admin review.
 
 import re
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 from django.db import transaction
+from django.db.models import (
+    Case,
+    Count,
+    Exists,
+    F,
+    IntegerField,
+    OuterRef,
+    Q,
+    QuerySet,
+    Subquery,
+    Value,
+    When,
+)
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -15,9 +30,10 @@ from apps.notifications.services import notify
 from apps.rbac.roles import Role
 from common import crypto
 from common.api import ApiError
+from common.filters import Facet
 
 from . import storage
-from .models import DocumentKind, DocumentStatus, KycDocument, PayoutAccount
+from .models import ACCOUNT_KYC_STATES, DocumentKind, DocumentStatus, KycDocument, PayoutAccount
 
 K = DocumentKind
 LABELS: dict[str, str] = {
@@ -121,6 +137,67 @@ def missing(user: User) -> list[str]:
     return gaps
 
 
+# --- verification state on the admin account pages (models.ACCOUNT_KYC_STATES) -------------------
+def with_state(
+    qs: QuerySet[Any], user_ref: str, required: QuerySet[KycDocument], needed: Any
+) -> QuerySet[Any]:
+    """
+    Annotates `kyc_state`: rejected if a required document is rejected; else incomplete if one of
+    the `needed` documents or the bank account is missing; else pending if one awaits review; else
+    verified. `required` is the account's required documents (filtered on OuterRef(user_ref)).
+    In SQL, so the lists can filter and page by it.
+    """
+    uploaded = Coalesce(
+        Subquery(
+            required.order_by().values("user").annotate(n=Count("pk")).values("n"),
+            output_field=IntegerField(),
+        ),
+        Value(0),
+    )
+    return qs.annotate(
+        kyc_uploaded=uploaded,
+        kyc_needed=needed,
+        kyc_state=Case(
+            When(Exists(required.filter(status=DocumentStatus.REJECTED)), then=Value("rejected")),
+            When(
+                Q(kyc_uploaded__lt=F("kyc_needed"))
+                | ~Exists(PayoutAccount.objects.filter(user=OuterRef(user_ref))),
+                then=Value("incomplete"),
+            ),
+            When(Exists(required.filter(status=DocumentStatus.PENDING)), then=Value("pending")),
+            default=Value("verified"),
+        ),
+    )
+
+
+# The admin account lists' `kyc` filter and facet (over with_state's `kyc_state`).
+KYC_FACET = Facet("kyc", values=ACCOUNT_KYC_STATES, field="kyc_state")
+
+
+def state_json(state: str | None, user: User) -> dict[str, Any]:
+    """{ status, missing: the required kinds with no document }."""
+    have = set(KycDocument.objects.filter(user=user).values_list("kind", flat=True))
+    return {"status": state, "missing": [k for k in required_kinds(user) if k not in have]}
+
+
+def reverify(user_id: Any, kinds: Iterable[str]) -> list[str]:
+    """Sends the approved documents of `kinds` back for review (a number on them changed by an
+    admin). Returns those kinds, sorted."""
+    approved = KycDocument.objects.filter(
+        user_id=user_id, kind__in=list(kinds), status=DocumentStatus.APPROVED
+    )
+    reverified = sorted(approved.values_list("kind", flat=True))
+    if reverified:
+        KycDocument.objects.filter(user_id=user_id, kind__in=reverified).update(
+            status=DocumentStatus.PENDING,
+            review_note="",
+            reviewed_at=None,
+            reviewed_by=None,
+            updated_at=timezone.now(),
+        )
+    return reverified
+
+
 # --- partner --------------------------------------------------------------------------------------
 
 
@@ -139,12 +216,8 @@ def upload(user: User, kind: str, data: bytes, number: str) -> KycDocument:
         doc.file_name, doc.content_type, doc.size = name, content_type, len(data)
         doc.number_encrypted = crypto.encrypt(number) if number else ""
         doc.number_last4 = crypto.last4(number) if number else ""
-        doc.status, doc.review_note, doc.reviewed_at, doc.reviewed_by = (
-            DocumentStatus.PENDING,
-            "",
-            None,
-            None,
-        )
+        doc.status, doc.review_note = DocumentStatus.PENDING, ""
+        doc.reviewed_at = doc.reviewed_by = None
         doc.save()
     if previous_file:
         transaction.on_commit(lambda: storage.delete(previous_file))
@@ -152,9 +225,7 @@ def upload(user: User, kind: str, data: bytes, number: str) -> KycDocument:
 
 
 def remove(user: User, doc_id: uuid.UUID) -> None:
-    doc = KycDocument.objects.filter(pk=doc_id, user=user).first()
-    if doc is None:
-        raise ApiError.not_found("Document not found")
+    doc = own_document(user, doc_id)
     if doc.status == DocumentStatus.APPROVED:
         raise ApiError.conflict(
             "Approved documents cannot be removed. Upload a new one to replace it."
@@ -200,9 +271,7 @@ def own_document(user: User, doc_id: uuid.UUID) -> KycDocument:
 def review(doc_id: uuid.UUID, status: str, note: str, admin: User) -> KycDocument:
     if status == DocumentStatus.REJECTED and not note:
         raise ApiError.bad_request("Say what is wrong, so the partner can fix it")
-    doc = KycDocument.objects.select_related("user").filter(pk=doc_id).first()
-    if doc is None:
-        raise ApiError.not_found("Document not found")
+    doc = document_for_admin(doc_id)
     doc.status, doc.review_note = status, note if status == DocumentStatus.REJECTED else ""
     doc.reviewed_at, doc.reviewed_by = timezone.now(), admin
     doc.save(update_fields=["status", "review_note", "reviewed_at", "reviewed_by", "updated_at"])

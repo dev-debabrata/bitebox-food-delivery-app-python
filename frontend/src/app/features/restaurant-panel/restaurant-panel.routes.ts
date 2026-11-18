@@ -20,7 +20,7 @@ export const RESTAURANT_ROUTES: Routes = [
   },
   {
     path: 'verification',
-    title: 'Verification | BiteBox Restaurant',
+    title: 'KYC Verification | BiteBox Restaurant',
     loadComponent: () =>
       import('./verification/restaurant-verification').then((m) => m.RestaurantVerification),
   },
@@ -28,6 +28,11 @@ export const RESTAURANT_ROUTES: Routes = [
     path: 'menu',
     title: 'Menu | BiteBox Restaurant',
     loadComponent: () => import('./menu/restaurant-menu').then((m) => m.RestaurantMenu),
+  },
+  {
+    path: 'offers',
+    title: 'Offers | BiteBox Restaurant',
+    loadComponent: () => import('./offers/restaurant-offers').then((m) => m.RestaurantOffers),
   },
   {
     path: 'reviews',

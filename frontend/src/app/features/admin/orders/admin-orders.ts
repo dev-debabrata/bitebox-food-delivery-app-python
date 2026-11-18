@@ -1,21 +1,17 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, input } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import { BbDialog } from '../../../shared/dialog/bb-dialog';
 import { DatePipe } from '@angular/common';
-import { form } from '@angular/forms/signals';
-import { IconComponent, PaginationComponent, SelectOption } from 'nexprime';
+import { IconComponent, PaginationComponent } from 'nexprime';
 import { AdminOrdersService } from '../../../core/services/order-management.service';
 import { EmptyState } from '../../../shared/components/empty-state/empty-state';
+import { ListToolbar } from '../../../shared/components/list-toolbar/list-toolbar';
+import { FilterSection } from '../../../shared/components/filter-panel/filter-panel.models';
 import { OrderStatusChip } from '../../../shared/components/order-status-chip/order-status-chip';
 import { PageHeader } from '../../../shared/components/page-header/page-header';
-import { NP_FORM_FIELDS } from '../../../shared/forms/np-form-fields';
-import { pagedList } from '../../../shared/list/paged-list';
-import {
-  ORDER_STATUS_LABEL,
-  OrderStatus,
-  PaymentStatus,
-  customerStatusLabel,
-} from '../../../shared/models/checkout.models';
-import { ACTIVE_STATUSES } from '../../../shared/models/order-management.models';
+import { filterOptions, filteredList } from '../../../shared/list/filtered-list';
+import { ORDER_STATUS_LABEL, PaymentStatus, customerStatusLabel } from '../../../shared/models/checkout.models';
+import { PAYMENT_STATUS_LABEL } from '../../../shared/models/payment.models';
 import { ItemCountPipe } from '../../../shared/pipes/item-count.pipe';
 import { InrPipe } from '../../../shared/pipes/money.pipes';
 import { openAdminOrder } from './admin-order-dialog/admin-order-dialog';
@@ -34,10 +30,11 @@ const PAYMENT_BADGE: Record<PaymentStatus, [string, string]> = {
   selector: 'bb-admin-orders',
   imports: [
     DatePipe,
-    NP_FORM_FIELDS,
+    RouterLink,
     IconComponent,
     PaginationComponent,
     EmptyState,
+    ListToolbar,
     OrderStatusChip,
     PageHeader,
     InrPipe,
@@ -53,38 +50,24 @@ export class AdminOrders {
   protected readonly statusLabel = customerStatusLabel;
   protected readonly payment = PAYMENT_BADGE;
 
-  protected readonly filterModel = signal({ status: '', search: '' });
-  protected readonly filters = form(this.filterModel);
+  /** ?customer=<user id>: one customer's orders (from the admin user page). */
+  readonly customer = input<string>();
 
-  protected readonly list = pagedList(
-    (page, limit) => {
-      const { status, search } = this.filterModel();
-      return this.api.list({
-        status: (status || undefined) as OrderStatus | 'active' | undefined,
-        search: search.trim() || undefined,
-        page,
-        limit,
-      });
-    },
-    {
-      filterKey: () => `${this.filterModel().status}|${this.filterModel().search.trim()}`,
-      pollMs: 60_000,
-      errorText: 'Could not load orders.',
-    },
-  );
+  protected readonly filterSections: FilterSection[] = [
+    { kind: 'options', key: 'status', label: 'Order status', options: filterOptions(ORDER_STATUS_LABEL) },
+    { kind: 'options', key: 'paymentMethod', label: 'Payment method', options: filterOptions({ cod: 'Cash', online: 'Online' }) },
+    { kind: 'options', key: 'paymentStatus', label: 'Payment status', options: filterOptions(PAYMENT_STATUS_LABEL) },
+    // Restaurants that have orders (the API's counts, with their names).
+    { kind: 'options', key: 'restaurant', label: 'Restaurant' },
+    { kind: 'dates', key: 'placed', label: 'Placed' },
+  ];
 
-  protected readonly statusOptions = computed<SelectOption[]>(() => {
-    const counts = this.list.data()?.counts ?? {};
-    const active = ACTIVE_STATUSES.reduce((sum, s) => sum + (counts[s] ?? 0), 0);
-    return [
-      { value: '', label: 'All orders' },
-      { value: 'active', label: `In progress (${active})` },
-      ...(Object.keys(ORDER_STATUS_LABEL) as OrderStatus[]).map((s) => ({
-        value: s,
-        label: `${ORDER_STATUS_LABEL[s]} (${counts[s] ?? 0})`,
-      })),
-    ];
+  protected readonly orders = filteredList((query) => this.api.list(query), {
+    errorText: 'Could not load orders.',
+    pollMs: 60_000,
+    extra: () => ({ customer: this.customer() || undefined }),
   });
+  protected readonly list = this.orders.list;
 
   protected open(id: string): void {
     openAdminOrder(this.dialog, id).subscribe(() => this.list.reload());

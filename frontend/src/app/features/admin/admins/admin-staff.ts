@@ -1,36 +1,30 @@
 import { TableLabels } from '../../../shared/list/table-labels';
 import { DatePipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { form } from '@angular/forms/signals';
-import { ButtonComponent, IconComponent, PaginationComponent, SelectOption } from 'nexprime';
+import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
+import { ButtonComponent, IconComponent, PaginationComponent } from 'nexprime';
 import { AuthService } from '../../../core/auth/auth.service';
 import { AdminStaffService } from '../../../core/services/admin/admin-staff.service';
-import { errorMessage } from '../../../core/services/api-error';
 import { NotificationService } from '../../../core/services/notification.service';
-import { confirmed } from '../../../shared/components/confirm-dialog/confirm-dialog';
+import { openAccountStatus, statusChanged } from '../../../shared/components/account-status-dialog/account-status-dialog';
 import { EmptyState } from '../../../shared/components/empty-state/empty-state';
 import { PageHeader } from '../../../shared/components/page-header/page-header';
-import { NP_FORM_FIELDS } from '../../../shared/forms/np-form-fields';
-import { pagedList } from '../../../shared/list/paged-list';
-import {
-  ADMIN_ROLES,
-  AdminRole,
-  ROLE_META,
-  STAFF_ADMIN_ROLES,
-  User,
-  UserStatus,
-} from '../../../shared/models/user.models';
+import { ListToolbar } from '../../../shared/components/list-toolbar/list-toolbar';
+import { FilterSection } from '../../../shared/components/filter-panel/filter-panel.models';
+import { filteredList } from '../../../shared/list/filtered-list';
+import { accountStatusSection, adminRoleSection } from '../filter-sections';
+import { AdminRole, ROLE_META, STAFF_ADMIN_ROLES, USER_STATUS_META, User } from '../../../shared/models/user.models';
 import { openStaffForm } from './staff-form-dialog/staff-form-dialog';
 import { openLoginHistory } from './login-history-dialog/login-history-dialog';
+import { openPermissionEditor } from './permission-editor-dialog/permission-editor-dialog';
 import { BbDialog } from '../../../shared/dialog/bb-dialog';
 
 /** Super admin: create operations, finance and support admins and manage their access. */
 @Component({
   selector: 'bb-admin-staff',
   imports: [
+    ListToolbar,
     TableLabels,
     DatePipe,
-    NP_FORM_FIELDS,
     PaginationComponent,
     IconComponent,
     EmptyState,
@@ -50,39 +44,19 @@ export class AdminStaff {
   protected readonly roleLabel = (role: string) => ROLE_META[role as AdminRole]?.label ?? role;
   protected readonly isStaff = (u: User) =>
     (STAFF_ADMIN_ROLES as readonly string[]).includes(u.role);
-  protected readonly busy = signal<string | null>(null);
+  protected readonly statusMeta = USER_STATUS_META;
 
-  protected readonly filterModel = signal({ search: '', role: '', status: '' });
-  protected readonly filters = form(this.filterModel);
-  protected readonly roleOptions: SelectOption[] = [
-    { value: '', label: 'All admin roles' },
-    ...ADMIN_ROLES.map((r) => ({ value: r, label: ROLE_META[r].label })),
-  ];
-  protected readonly statusOptions: SelectOption[] = [
-    { value: '', label: 'Active and inactive' },
-    { value: 'active', label: 'Active' },
-    { value: 'suspended', label: 'Inactive' },
-  ];
-
-  protected readonly list = pagedList(
-    (page, limit) => {
-      const f = this.filterModel();
-      return this.api.list({
-        search: f.search.trim() || undefined,
-        role: (f.role || undefined) as AdminRole | undefined,
-        status: (f.status || undefined) as UserStatus | undefined,
-        page,
-        limit,
-      });
-    },
-    { filterKey: () => JSON.stringify(this.filterModel()), errorText: 'Could not load admins.' },
-  );
+  protected readonly filterSections: FilterSection[] = [adminRoleSection('Role'), accountStatusSection('status', 'Status')];
+  protected readonly admins = filteredList((query) => this.api.list(query), { errorText: 'Could not load admins.' });
+  protected readonly list = this.admins.list;
 
   protected create(): void {
     openStaffForm(this.bbDialog, null).subscribe((user) => {
       if (!user) return;
       this.notify.success(`${user.name} can now sign in as ${this.roleLabel(user.role)}`);
       this.list.load(1);
+      // An operator can do nothing until given permissions.
+      if (user.role === 'operator') this.editPermissions(user);
     });
   }
 
@@ -94,29 +68,28 @@ export class AdminStaff {
     });
   }
 
-  protected toggle(user: User): void {
-    const activate = user.status !== 'active';
-    confirmed(this.bbDialog, {
-      title: activate ? `Activate ${user.name}?` : `Deactivate ${user.name}?`,
-      message: activate
-        ? 'They can sign in again with their existing password.'
-        : 'They are signed out everywhere and cannot sign in until you activate them again.',
-      confirmLabel: activate ? 'Activate' : 'Deactivate',
-      danger: !activate,
-    }).subscribe(() => {
-      this.busy.set(user.id);
-      this.api.setStatus(user.id, activate ? 'active' : 'suspended').subscribe({
-        next: () => {
-          this.busy.set(null);
-          this.notify.success(activate ? 'Admin activated' : 'Admin deactivated');
-          this.list.reload();
-        },
-        error: (err: unknown) => {
-          this.busy.set(null);
-          this.notify.error(errorMessage(err));
-        },
-      });
+  protected changeStatus(user: User): void {
+    openAccountStatus(this.bbDialog, {
+      user,
+      kind: 'admins',
+      save: (status, reason) => this.api.setStatus(user.id, status, reason),
+    }).subscribe((updated) => {
+      this.notify.success(statusChanged(updated));
+      this.list.reload();
     });
+  }
+
+  protected editPermissions(user: User): void {
+    openPermissionEditor(this.bbDialog, user).subscribe((saved) => {
+      this.notify.success(`${saved.name}'s permissions saved`);
+      this.list.reload();
+    });
+  }
+
+  /** "Role preset" or "Own list of N". */
+  protected permissionSummary(u: User): string {
+    const n = u.permissions?.length ?? 0;
+    return u.customPermissions == null && u.role !== 'operator' ? `Role preset · ${n}` : `Own list · ${n}`;
   }
 
   protected showLogins(user: User): void {

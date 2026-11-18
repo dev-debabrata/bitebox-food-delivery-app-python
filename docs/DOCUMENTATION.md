@@ -207,7 +207,7 @@ Use four browser profiles, or normal and private windows.
 | `PRIVATE_UPLOAD_DIR` | `private-uploads` | KYC documents (mount a persistent volume; never serve it) |
 | `RESTAURANT_KYC_REQUIRED` | `true` | Approval needs the FSSAI number, approved documents and a bank account |
 | `RIDER_KYC_REQUIRED` | `true` | New riders go online only after verification (documents, bank account, address) |
-| `SIGNUP_OTP_REQUIRED` | `true` | Sign-up confirms the mobile number with an SMS code first (only while an SMS provider is on; otherwise sign-up is one step) |
+| `SIGNUP_OTP_REQUIRED` | `true` | Sign-up confirms the email address with an emailed 6-digit code first, and the account starts with the email verified (`false`: sign-up is one step and a verification link is emailed instead) |
 | `OTP_TTL_SECONDS`, `OTP_RESEND_SECONDS` | `300`, `30` | SMS code lifetime and wait before a new one (5 wrong tries lock a code) |
 | `OTP_PER_PHONE_PER_HOUR`, `OTP_PER_IP_PER_HOUR` | `5`, `20` | SMS code limits |
 | `MSG91_OTP_TEMPLATE_ID` | | DLT template for sign-in codes (falls back to `MSG91_TEMPLATE_ID`) |
@@ -362,6 +362,12 @@ All are idempotent and safe to run on several API instances at once. Tests call 
   - Shared rules are in `shared/forms/form-rules.ts`. `shownError()` shows an error once the field is touched, and `serverErrors()` maps API 422 errors onto fields.
   - `NP_FORM_FIELDS` bundles the NexPrime inputs and helpers.
 - **Lists:** `shared/list/paged-list.ts#pagedList(fetch, opts)` handles paging, filters, loading and errors, and live refresh.
+- **List filters:** searchable lists use `shared/list/filtered-list.ts#filteredList(fetch, opts)` with `<bb-list-toolbar>`:
+  - The toolbar has the search box, a **Filters** button and an optional sort select, all on the right. Applied filters show as removable chips below.
+  - The Filters button opens `shared/components/filter-panel`, a side drawer with one section per filter (one section open at a time). It shows a live count beside each option and the total, from the list's `?facets=1` response.
+  - A page declares its sections as `FilterSection[]`: fixed options (`filterOptions(labels)`), open options whose values come from the API counts (`labelOf` names ids), or date ranges (`kind: 'dates'`, sent as `<key>From`/`<key>To`; `instants: true` sends ISO instants instead of days).
+  - `extra: () => ({...})` carries fixed parameters (a tab, a route `:view`, a payout type). Lists open with nothing selected.
+  - With `lazy: true` the list waits for the page's `load(1)`; with `pollMs` as well, live refresh starts at that first load.
 - **Icons:** `<np-icon name="…">` with Lucide names. Material names stored in data go through `| npIcon`.
 - **Styles:**
   - Brand tokens `--bb-*` live in `src/styles.scss`, with NexPrime's `--ui-*` variables mapped onto them.
@@ -859,10 +865,11 @@ The service worker only runs in **production builds** (`npm run build`, then `np
 | POST | `/auth/reset-password` | public, rate limited | Reset the password with the emailed token |
 | GET, PATCH | `/auth/me` | signed in | Current user / update own profile |
 | POST | `/auth/change-password` | signed in | Change password (signs out every session) |
-| POST | `/auth/register/code` | public | Sign-up step 1: checks the email and number are free, texts a 6-digit code. `POST /auth/register` then needs `code` (while `SIGNUP_OTP_REQUIRED` and SMS are on) and creates the account with the number verified |
+| POST | `/auth/register/code` | public | Sign-up step 1: checks the email and number are free, emails a 6-digit code (`codeRequired: true`). `POST /auth/register` then needs `code` (while `SIGNUP_OTP_REQUIRED` is on) and creates the account with the email verified. With codes off it answers `codeRequired: false` and sends nothing. 503 `EMAIL_UNAVAILABLE` when the email can't be sent |
 | POST | `/auth/otp/request`, `/auth/otp/login` | public | Sign in with a mobile number: text a code (same answer whether or not the number has an account), then sign in with it |
 | POST | `/auth/phone/verification`, `/auth/phone/verify` | signed in | Confirm your own number with an SMS code (changing the number clears it) |
-| POST | `/auth/email/verification` (signed in), `/auth/email/verify` (public) | | New accounts get a link (`/verify-email?token=`, 24 hours, works once); ask for a new one |
+| POST | `/auth/email/code`, `/auth/email/code/verify` (signed in) | | Account page: email a 6-digit code, then confirm the address with it (same limits as SMS codes) |
+| POST | `/auth/email/verification` (signed in), `/auth/email/verify` (public) | | Accounts created without a code get a link (`/verify-email?token=`, 24 hours, works once); ask for a new one |
 | POST | `/uploads/avatars` | signed in | Profile photo (saved with `PATCH /auth/me` `avatarUrl`; `null` removes it) |
 | GET | `/admin/users` | `users:manage` | List accounts (role, status, search, paging) |
 | PATCH | `/admin/users/{id}/status` | `users:manage` | Suspend or reactivate |
@@ -928,7 +935,36 @@ The service worker only runs in **production builds** (`npm run build`, then `np
 | GET | `/orders/{id}/timeline` | My order's status changes |
 | POST | `/orders/{id}/cancel` | Cancel before the restaurant accepts |
 
-Admin coupons (`catalog:manage`): `GET/POST /admin/coupons`, `PATCH/DELETE /admin/coupons/{id}`.
+#### Coupons and restaurant offers
+
+One collection/table holds platform coupons (`source: platform`, created by admins) and restaurant offers (`source: restaurant`, created by a partner for their own restaurant). Types: `percent`, `flat`, `free_delivery` (waives the delivery fee, shown as `pricing.deliveryDiscountPaise`). Optional scope: restaurants, food categories and dishes (a category or dish coupon discounts only those cart lines); audience `all`, `new` (no orders yet) or `existing`. Restaurant offers need admin approval when `OFFER_APPROVAL_REQUIRED` is on (default); customers only see approved, active coupons inside their dates. All discounts are computed on the server (`coupons/services.py` / `coupon.service.js` and the cart pricing).
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| GET | `/coupons/available?restaurantId=` | customer | Coupons usable on this cart (best first) |
+| GET | `/coupons/offers?type=` | customer | Offers page: `percent`, `flat`, `free_delivery`, `first_order`, `restaurant`, `category` |
+| GET | `/restaurants/{slugOrId}/offers` | public | A restaurant's offers & deals (its own first, then platform-wide) |
+| GET/POST | `/admin/coupons` | `catalog:manage` | List (`search`, `status`, `owner`, `sort`, `from`, `to`, paging) / create (code generated when left out) |
+| GET | `/admin/coupons/analytics` | `catalog:manage` | Counts by status, redemptions, discount given, top coupons |
+| GET/PATCH/DELETE | `/admin/coupons/{id}` | `catalog:manage` | One coupon / edit / delete (unused only) |
+| PATCH | `/admin/coupons/{id}/status` | `catalog:manage` | `{ isActive }` |
+| POST | `/admin/coupons/{id}/duplicate` | `catalog:manage` | A switched-off copy with a new code |
+| GET | `/admin/restaurant-offers/pending` | `catalog:manage` | Restaurant offers waiting for review |
+| POST | `/admin/restaurant-offers/{id}/approve`, `/reject` | `catalog:manage` | Decide (reject needs `reason`); the partner is notified |
+| GET/POST | `/my/restaurant/offers` | restaurant partner | Own offers / create (`draft: true` saves without submitting) |
+| GET | `/my/restaurant/offers/analytics` | restaurant partner | Own offers' counts, redemptions and discount given |
+| GET/PATCH/DELETE | `/my/restaurant/offers/{id}` | restaurant partner | One offer / edit (sends it for review again) / delete |
+| PATCH | `/my/restaurant/offers/{id}/status` | restaurant partner | Pause or resume `{ isActive }` |
+
+The public restaurant list (`GET /restaurants`) includes each restaurant's best live offer as `offer` (for card badges).
+
+**Stacked discounts.** Every discount has a `kind`: `coupon` (the customer enters or picks a code), `restaurant_offer` (made by a restaurant partner), `platform_offer` (made by an admin) and `payment_offer` (made by an admin for online payments, optionally only some `paymentChannels`: `upi`, `card`, `netbanking`, `wallet`). Offers apply by themselves; only coupons are entered as codes (an offer's code is refused with `COUPON_AUTOMATIC`). An order gets at most one of each kind, applied in this order, each on the food left after the ones before: the best restaurant offer, the best platform offer, the applied coupon, then the best payment offer for the channel the customer pays with. Reward coins come last. "Best" is what an offer saves within that stack (`apps/cart/discounts.py` / `services/discount-stack.js`).
+
+The cart quote (`GET /cart?addressId=&payment=upi`) returns `discounts` (each with `kind`, `code`, `name`, `foodPaise`, `deliveryPaise`, `savingPaise`, `fundedBy`), `coupon` (the code's own saving), `bestCoupon` (the coupon code that would save most on top of the automatic offers), `paymentOffers` (the best payment offer per channel, for the payment step) and `paymentChannel`. `pricing.discountPaise` is every food discount together. Placing an order takes `paymentChannel` for online payments; the order keeps the `discounts` snapshot, `paymentChannel` and `restaurantDiscountPaise`, and every discount gets a redemption (one use each, given back if the order is cancelled). The payment session returns `channel` so checkout opens with only that method.
+
+Funding: a restaurant pays for its own offers (they come off the food value its commission is worked out on, plus any delivery fee its offer waived). BiteBox pays for platform offers, coupons, payment offers and coins, so the restaurant is paid as if those were not there.
+
+Customer screens: `/offers` (signed-in customers, filter by kind), the offer ribbon on restaurant cards, "Offers & deals" on each restaurant page, and the coupon dialog and best-offer row at checkout. The bill shows a waived delivery fee struck through and a "You saved" line (coupon, waived fee and coins).
 
 ### Restaurant and rider operations
 
@@ -1056,6 +1092,29 @@ Requesters (customer, restaurant or rider) use `GET/POST /support/tickets`, `GET
 | POST | `/admin/notifications/deliveries/{id}/retry` | `operations:view` (audited) | Send a failed or dead delivery again |
 | POST | `/admin/push/promotions` | `promotions:send` (rate limited, audited) | Push an offer to opted-in customers |
 | POST | `/newsletter/subscriptions` | public, rate limited | Subscribe an email |
+
+### List filters and counts
+
+Searchable lists share the same query rules in both APIs:
+
+- **Several values:** an option filter takes one value or several, comma-separated (`status=open,in_progress`). Values of one filter are OR'ed; different filters are AND'ed. Single values work as before.
+- **Counts:** `facets=1` adds `data.facets`, `{ <filter>: [{ value, count, label? }] }`. Each filter is counted with every other filter applied but not its own (standard faceted search). Fixed-value filters list every value (0 when none match); open ones (restaurants, categories, campaigns, assignees, dishes) list the values that occur, with a `label` for ids.
+- **Dates:** a range is `<name>From` / `<name>To`, whole days in the report time zone (some lists take ISO instants as `from`/`to`). A reversed range is a 422.
+- **Errors:** an unknown value is a 422 `VALIDATION_ERROR` with "Invalid value" on that field.
+- **Scope:** restaurant, rider and customer lists are scoped to the signed-in user on the server; their counts never include anyone else's rows. Admin lists keep their permission guards.
+- **Implementation:** Django `common/filters.py` (`Facet`, `apply_facets`, `with_facets`); Node `services/admin-accounts.js#facetCounts` and `validators/common.validators.js`.
+
+| Area | Lists with filters and counts |
+|---|---|
+| Admin: operations and accounts | orders, restaurants, delivery partners, food items, customers, restaurant and rider accounts, admins and operators, audit log |
+| Admin: finance | transactions (`/admin/payments`), restaurant and rider payouts, refunds, ledger |
+| Admin: support | support ticket queues, reviews (All and Reported tabs) |
+| Admin: coins and rewards | campaigns, referrals, coin transactions, reward history |
+| Admin: marketing | coupons and offers |
+| Restaurant panel | order history, menu, offers, reviews, earnings (by order and payouts), support tickets |
+| Rider panel | delivery history, ratings, earnings (by order and payouts), support tickets |
+
+Not filtered (not paginated lists): dashboards and overviews, commission, financial reports, categories, push promotions, the offer review queue, rewards settings, and the live restaurant order stages.
 
 ### Common error codes
 

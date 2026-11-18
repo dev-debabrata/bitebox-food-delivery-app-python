@@ -5,14 +5,15 @@ reward is a RewardClaim with a unique key, then a ledger credit keyed by the cla
 can be paid twice.
 """
 
+import functools
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from django.db import IntegrityError, transaction
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Count, F, Q, QuerySet, Sum
 from django.utils import timezone
 
 from apps.accounts.models import User, UserStatus
@@ -21,6 +22,7 @@ from apps.orders.models import Order, OrderStatus
 from apps.rbac.roles import Role
 from apps.restaurants.models import Restaurant
 from common.api import ApiError
+from common.filters import Facet, apply_facets, days_between, text_search, with_facets
 from common.pagination import Page, paginate
 
 from . import wallet
@@ -36,7 +38,7 @@ from .models import (
 )
 from .orders import food_value_paise
 from .quote import get_reward_config, rule_on
-from .referrals import person
+from .referrals import matching_user_ids, person
 
 logger = logging.getLogger("bitebox.coins")
 
@@ -53,10 +55,6 @@ GROUP_REASON = {
     G.EXISTING: "For customers who have ordered before",
     G.INACTIVE: "For customers who have not ordered for a while",
 }
-
-
-def _conflict(message: str, code: str) -> ApiError:
-    return ApiError.conflict(message, code)
 
 
 def _invalid(field: str, message: str) -> ApiError:
@@ -207,8 +205,8 @@ def birthday_sweep(*, now: datetime | None = None, limit: int = 500) -> dict[str
     return {"issued": issued}
 
 
-def set_birth_date(user_id: Any, iso_date: str, now: datetime | None = None) -> dict[str, str]:
-    """The customer sets their date of birth, once (support can correct it)."""
+def birth_date_from(iso_date: str, now: datetime | None = None) -> date:
+    """A `YYYY-MM-DD` date of birth, or 422 on `birthDate` unless the age is 13-120 years."""
     now = now or timezone.now()
     try:
         born = date.fromisoformat(iso_date)
@@ -222,10 +220,16 @@ def set_birth_date(user_id: Any, iso_date: str, now: datetime | None = None) -> 
             code="VALIDATION_ERROR",
             details=[{"field": "birthDate", "message": "Enter your real date of birth"}],
         )
+    return born
+
+
+def set_birth_date(user_id: Any, iso_date: str, now: datetime | None = None) -> dict[str, str]:
+    """The customer sets their date of birth, once (support can correct it)."""
+    born = birth_date_from(iso_date, now)
     if not User.objects.filter(pk=user_id, role=Role.CUSTOMER, birth_date__isnull=True).update(
         birth_date=born
     ):
-        raise _conflict(
+        raise ApiError.conflict(
             "Your birthday is already saved. Contact support to change it.", "BIRTHDAY_SET"
         )
     return {"birth_date": iso_date}
@@ -244,14 +248,7 @@ def _order_history(user_id: Any, exclude_order_id: Any = None) -> dict[str, Any]
 
 
 def _lazy_history(user_id: Any) -> Callable[[], dict[str, Any]]:
-    cache: list[dict[str, Any]] = []
-
-    def load() -> dict[str, Any]:
-        if not cache:
-            cache.append(_order_history(user_id))
-        return cache[0]
-
-    return load
+    return functools.cache(functools.partial(_order_history, user_id))
 
 
 def _group_ok(c: RewardCampaign, history: dict[str, Any], now: datetime) -> bool:
@@ -299,11 +296,11 @@ def _claim_campaign(
     """
     now = now or timezone.now()
     if not get_reward_config()["coins_enabled"]:
-        raise _conflict("Rewards are paused right now", "REWARDS_PAUSED")
+        raise ApiError.conflict("Rewards are paused right now", "REWARDS_PAUSED")
     for _ in range(5):
         used = RewardClaim.objects.filter(campaign=campaign, user_id=user_id).count()
         if used >= campaign.max_claims_per_customer:
-            raise _conflict("You have already claimed this reward", "ALREADY_CLAIMED")
+            raise ApiError.conflict("You have already claimed this reward", "ALREADY_CLAIMED")
         try:
             with transaction.atomic():
                 counted = (
@@ -324,7 +321,9 @@ def _claim_campaign(
                     )
                 )
                 if not counted:
-                    raise _conflict("This reward is no longer available", "CAMPAIGN_UNAVAILABLE")
+                    raise ApiError.conflict(
+                        "This reward is no longer available", "CAMPAIGN_UNAVAILABLE"
+                    )
                 claim = RewardClaim.objects.create(
                     user_id=user_id,
                     campaign=campaign,
@@ -353,7 +352,7 @@ def _claim_campaign(
             description=campaign.name,
             title=f"You earned {campaign.reward_coins} coins",
         )
-    raise _conflict("Please try again", "CLAIM_BUSY")
+    raise ApiError.conflict("Please try again", "CLAIM_BUSY")
 
 
 def _complete_if_full(campaign_id: Any) -> None:
@@ -375,10 +374,10 @@ def claim(user_id: Any, campaign_id: Any, now: datetime | None = None) -> dict[s
     used = RewardClaim.objects.filter(campaign=campaign, user_id=user_id).count()
     blocker = _claim_blocker(campaign, _lazy_history(user_id), now, used)
     if blocker:
-        raise _conflict(blocker, "NOT_ELIGIBLE")
+        raise ApiError.conflict(blocker, "NOT_ELIGIBLE")
     issued = _claim_campaign(campaign, user_id, now=now)
     if issued is None:  # only order campaigns skip a duplicate; claims always pay or raise
-        raise _conflict("Please try again", "CLAIM_BUSY")
+        raise ApiError.conflict("Please try again", "CLAIM_BUSY")
     return {"claim": claim_view(issued)}
 
 
@@ -465,9 +464,8 @@ def claim_view(c: RewardClaim) -> dict[str, Any]:
     }
 
 
-def _for_customer(
-    c: RewardCampaign, used: int, blocker: str | None, now: datetime
-) -> dict[str, Any]:
+def _basics(c: RewardCampaign) -> dict[str, Any]:
+    """The fields customers and staff both see."""
     return {
         "id": str(c.pk),
         "name": c.name,
@@ -478,6 +476,14 @@ def _for_customer(
         "start_at": c.start_at,
         "end_at": c.end_at,
         "coins_expire_at": c.coins_expire_at,
+    }
+
+
+def _for_customer(
+    c: RewardCampaign, used: int, blocker: str | None, now: datetime
+) -> dict[str, Any]:
+    return {
+        **_basics(c),
         "status": CS.SCHEDULED if c.status == CS.ACTIVE and c.start_at > now else c.status,
         "conditions": {
             "min_order_paise": c.min_order_paise,
@@ -499,7 +505,9 @@ def customer_campaigns(user_id: Any, now: datetime | None = None) -> dict[str, A
             status__in=[CS.ACTIVE, CS.SCHEDULED],
             end_at__gt=now,
             start_at__lte=now + timedelta(days=30),
-        ).order_by("end_at")[:50]
+        )
+        .prefetch_related("restaurants")
+        .order_by("end_at")[:50]
     )
     counts = {
         row["campaign"]: row["n"]
@@ -657,11 +665,11 @@ def _get(campaign_id: Any) -> RewardCampaign:
 def admin_update(admin: User, campaign_id: Any, data: dict[str, Any]) -> dict[str, Any]:
     c = _get(campaign_id)
     if c.status in (CS.EXPIRED, CS.COMPLETED):
-        raise _conflict("Finished campaigns cannot be edited", "CAMPAIGN_FINISHED")
+        raise ApiError.conflict("Finished campaigns cannot be edited", "CAMPAIGN_FINISHED")
     fields = EDITABLE_WHILE_RUNNING if c.status == CS.ACTIVE else EDITABLE
     blocked = [k for k in data if k in EDITABLE and k not in fields]
     if blocked:
-        raise _conflict(
+        raise ApiError.conflict(
             f"Pause the campaign to change: {', '.join(CAMEL.get(k, k) for k in blocked)}",
             "CAMPAIGN_RUNNING",
         )
@@ -686,31 +694,27 @@ def admin_set_status(
     c = _get(campaign_id)
     if c.status not in MOVES[action]:
         verb = "ended" if action == "end" else f"{action}d"
-        raise _conflict(f"A {c.status.lower()} campaign cannot be {verb}", "INVALID_CAMPAIGN_MOVE")
+        raise ApiError.conflict(
+            f"A {c.status.lower()} campaign cannot be {verb}", "INVALID_CAMPAIGN_MOVE"
+        )
     if action == "activate":
         if c.end_at <= now:
-            raise _conflict("The end date has passed. Change it first.", "CAMPAIGN_ENDED")
+            raise ApiError.conflict("The end date has passed. Change it first.", "CAMPAIGN_ENDED")
         to = CS.SCHEDULED if c.start_at > now else CS.ACTIVE
     else:
         to = CS.PAUSED if action == "pause" else CS.COMPLETED
     if not RewardCampaign.objects.filter(pk=c.pk, status=c.status).update(
         status=to, updated_by=admin, updated_at=now
     ):
-        raise _conflict("The campaign was just changed. Refresh and try again.", "CAMPAIGN_CHANGED")
+        raise ApiError.conflict(
+            "The campaign was just changed. Refresh and try again.", "CAMPAIGN_CHANGED"
+        )
     return admin_view(_get(c.pk))
 
 
 def admin_view(c: RewardCampaign, restaurants: list[Any] | None = None) -> dict[str, Any]:
     return {
-        "id": str(c.pk),
-        "name": c.name,
-        "description": c.description,
-        "type": c.type,
-        "trigger": c.trigger,
-        "reward_coins": c.reward_coins,
-        "start_at": c.start_at,
-        "end_at": c.end_at,
-        "coins_expire_at": c.coins_expire_at,
+        **_basics(c),
         "timezone": c.timezone,
         "status": c.status,
         "conditions": {
@@ -719,9 +723,7 @@ def admin_view(c: RewardCampaign, restaurants: list[Any] | None = None) -> dict[
             "min_order_paise": c.min_order_paise,
             "first_order_only": c.first_order_only,
             "restaurants": (
-                restaurants
-                if restaurants is not None
-                else [str(pk) for pk in c.restaurants.values_list("pk", flat=True)]
+                restaurants if restaurants is not None else [str(r.pk) for r in c.restaurants.all()]
             ),
         },
         "limits": {
@@ -743,16 +745,30 @@ def admin_view(c: RewardCampaign, restaurants: list[Any] | None = None) -> dict[
     }
 
 
+# The campaigns list's Filters panel.
+CAMPAIGN_FACETS = (
+    Facet("status", values=CampaignStatus.values),
+    Facet("type", values=CampaignType.values),
+    Facet("trigger", values=CampaignTrigger.values),
+    Facet("customer_group", values=CustomerGroup.values),
+)
+
+
+def campaign_rows(query: Mapping[str, Any]) -> QuerySet[RewardCampaign]:
+    """The campaigns matching the facets, running on any day from runs_from to runs_to, and a
+    name search."""
+    qs = apply_facets(RewardCampaign.objects.all(), query, CAMPAIGN_FACETS)
+    # Runs on one of those days: ends on or after the first, starts before the last one is over.
+    qs = qs.filter(days_between({"runs_from": query.get("runs_from")}, "runs", "end_at"))
+    qs = qs.filter(days_between({"runs_to": query.get("runs_to")}, "runs", "start_at"))
+    return qs.filter(text_search(query.get("search"), "name"))
+
+
 def admin_list(query: dict[str, Any], page: Page) -> dict[str, Any]:
-    qs = RewardCampaign.objects.prefetch_related("restaurants")
-    if query.get("status"):
-        qs = qs.filter(status=query["status"])
-    if query.get("type"):
-        qs = qs.filter(type=query["type"])
-    if query.get("search"):
-        qs = qs.filter(name__icontains=query["search"])
-    rows, meta = paginate(qs.order_by("-created_at"), page)
-    return {"items": [admin_view(c) for c in rows], "pagination": meta}
+    qs = campaign_rows(query).prefetch_related("restaurants")
+    rows, meta = paginate(qs.order_by("-created_at", "-pk"), page)
+    result = {"items": [admin_view(c) for c in rows], "pagination": meta}
+    return with_facets(result, query, campaign_rows, CAMPAIGN_FACETS)
 
 
 def admin_get(campaign_id: Any) -> dict[str, Any]:
@@ -781,13 +797,30 @@ def admin_get(campaign_id: Any) -> dict[str, Any]:
 
 def admin_claims(query: dict[str, Any], page: Page) -> dict[str, Any]:
     """Every reward claim (welcome, birthday, campaigns), newest first."""
-    qs = RewardClaim.objects.select_related("user", "campaign")
-    if query.get("reward_type"):
-        qs = qs.filter(reward_type=query["reward_type"])
-    if query.get("campaign"):
-        qs = qs.filter(campaign_id=query["campaign"])
-    rows, meta = paginate(qs.order_by("-created_at"), page)
-    return {
+    qs = claim_rows(query).select_related("user", "campaign")
+    rows, meta = paginate(qs.order_by("-created_at", "-pk"), page)
+    result = {
         "items": [{**claim_view(c), "customer": person(c.user)} for c in rows],
         "pagination": meta,
     }
+    return with_facets(result, query, claim_rows, CLAIM_FACETS)
+
+
+# The reward history's Filters panel; campaign: the campaigns that gave rewards, with names.
+CLAIM_FACETS = (
+    Facet("reward_type", values=RewardType.values),
+    Facet("status", values=ClaimStatus.values),
+    Facet("campaign", field="campaign_id", label="campaign__name"),
+)
+
+
+def claim_rows(query: Mapping[str, Any]) -> QuerySet[RewardClaim]:
+    """The claims matching the facets, the day claimed and a search over the customer or
+    campaign."""
+    qs = apply_facets(RewardClaim.objects.all(), query, CLAIM_FACETS)
+    qs = qs.filter(days_between(query, "claimed"))
+    if search := (query.get("search") or "").strip():
+        qs = qs.filter(
+            Q(user_id__in=matching_user_ids(search)) | Q(campaign__name__icontains=search)
+        )
+    return qs

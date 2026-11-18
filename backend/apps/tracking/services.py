@@ -12,10 +12,10 @@ from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.delivery.models import DeliveryPartner
-from apps.orders.models import TRACKED_STATUSES, Order
+from apps.orders.models import TRACKED_STATUSES, Order, OrderStatus
 from apps.rbac.roles import Permission, Role, has_permission
 from common.api import ApiError
-from common.geo import GeoPoint
+from common.geo import GeoPoint, haversine_m
 
 from .models import TrackingPoint
 
@@ -59,9 +59,7 @@ def on_position(
 
 def notify_if_approaching(order_id: Any, latitude: float, longitude: float, at: datetime) -> bool:
     """Once per order: the rider on the way is within APPROACH_NOTIFY_METERS of the customer."""
-    from apps.orders.models import OrderStatus
     from apps.orders.notifications import notify_approaching
-    from common.geo import haversine_m
 
     order = Order.objects.filter(
         pk=order_id, status=OrderStatus.ON_THE_WAY, approach_notified_at__isnull=True
@@ -90,7 +88,7 @@ def tracked_order_id(rider_id: Any) -> uuid.UUID | None:
 
 
 def _can_view(user: User, order: Order) -> bool:
-    if has_permission(user.role, Permission.ORDERS_VIEW):
+    if has_permission(user, Permission.ORDERS_VIEW):
         return True
     if user.role == Role.CUSTOMER:
         return order.customer_id == user.pk

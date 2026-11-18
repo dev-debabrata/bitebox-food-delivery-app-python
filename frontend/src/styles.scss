@@ -693,13 +693,60 @@ np-tabs.bb-tab-strip .tab-panel {
 
 np-tabs.bb-tab-strip {
   display: block;
+  min-width: 0;
   margin-bottom: var(--bb-space-4);
+
+  // Many tabs (account profiles): one line that scrolls sideways (bb-tab-strip adds ← →
+  // buttons), so the page never widens.
+  .tab-list {
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+  }
 }
 
 // A narrower np-menu popup for short action lists (e.g. Edit / Delete). Keep the width in sync with
 // COMPACT_MENU_WIDTH in shared/menu/end-aligned-menu.ts, which aligns the panel to its trigger.
 np-menu.bb-menu-compact .menu.mi-panel {
   width: 160px;
+}
+
+// One-time code boxes (np-input-otp): 48px each, smaller on narrow phones so six fit in the card.
+// `.otp.otp` outranks NexPrime's emulated `.otp` rule.
+np-input-otp .otp.otp {
+  --otp-box: clamp(38px, 11vw, 48px);
+}
+
+// In the sign-in and sign-up cards the boxes share the full width, like the inputs around them.
+.bb-form np-input-otp {
+  display: block !important;
+  width: 100%;
+
+  .otp.otp {
+    --otp-box: 52px;
+    gap: clamp(6px, 2vw, 12px);
+  }
+
+  .otp__box.otp__box {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+    max-width: 64px;
+  }
+}
+
+// A filled submit button that is busy (it shows a spinner) keeps its colour, with a white
+// spinner, instead of greying out like a disabled button.
+.bb-form button[mat-flat-button][type='submit'][disabled]:has(mat-progress-spinner) {
+  background-color: var(--bb-brand);
+  color: var(--bb-on-brand);
+  opacity: 0.85;
+  cursor: progress;
+
+  mat-progress-spinner {
+    --mat-progress-spinner-active-indicator-color: currentColor;
+    margin-inline: auto;
+  }
 }
 
 // NexPrime colours any `.ui-control[aria-invalid='true']` red, and Signal Forms sets `invalid` as
@@ -846,6 +893,23 @@ np-menu.bb-menu-compact .menu.mi-panel {
   }
 }
 
+.bb-location-detected-panel .cdk-dialog-container {
+  border-radius: var(--bb-radius-lg);
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  animation: popupScaleIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes popupScaleIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.88) translateY(12px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
 .bb-dialog__title {
   margin: 0;
   padding: var(--bb-space-5) var(--bb-space-5) var(--bb-space-2);
@@ -919,9 +983,11 @@ np-textarea:has(.count) + bb-field-error {
   max-width: none !important;
 }
 
-// Availability switches are green when on (NexPrime fills the track with --ui-gradient).
-np-toggle.bb-toggle-success {
+// Every switch is green when on (NexPrime fills the track with --ui-gradient; the iOS and icon
+// variants use --ui-primary).
+np-toggle {
   --ui-gradient: var(--bb-success);
+  --ui-primary: var(--bb-success);
 }
 
 // A switch whose label changes with its state ("Off" / "Available"): fixed label width so the
@@ -945,6 +1011,10 @@ np-toggle.bb-toggle-stable:has(input:checked) .toggle-label {
   white-space: nowrap;
 }
 np-toggle.bb-label-hidden .toggle-label {
+  @include visually-hidden;
+}
+// np-progress-bar's `label` is also a visible caption; keep it as the accessible name only.
+np-progress-bar.bb-label-hidden .caption {
   @include visually-hidden;
 }
 np-toggle.bb-label-hidden-phone .toggle-label {
@@ -994,6 +1064,29 @@ np-time-picker .time-picker-field {
   );
   background-size: 400% 100%;
   animation: bb-shimmer 1.4s ease infinite;
+}
+
+// A small green dot that pulses: "live" / "online" (rider dashboard, location popup).
+.bb-live-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bb-success);
+  animation: bb-live-dot 2s infinite;
+}
+
+@keyframes bb-live-dot {
+  0%,
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--bb-success) 60%, transparent);
+  }
+  50% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 6px transparent;
+  }
 }
 
 @keyframes bb-shimmer {
@@ -1108,6 +1201,56 @@ np-time-picker .time-picker-field {
   }
 }
 
+// A small uppercase heading between groups of fields in a long form ("Discount", "Limits and dates").
+.bb-form-section {
+  margin: var(--bb-space-3) 0 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bb-ink-muted);
+}
+
+// A coupon ticket's APPLY / COPY / VIEW: bold text in its corner (shared/components/coupon-ticket).
+.bb-ticket-action {
+  flex-shrink: 0;
+  // Padded for the hover pill, pulled back so the text stays where it was.
+  margin: -4px -10px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+  color: var(--bb-amber-600);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  cursor: pointer;
+  &:not(:disabled):hover {
+    background: color-mix(in srgb, var(--bb-amber-600) 14%, transparent);
+  }
+  &:not(:disabled):active {
+    background: color-mix(in srgb, var(--bb-amber-600) 22%, transparent);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--bb-amber-600);
+    outline-offset: 1px;
+  }
+  &:disabled {
+    color: var(--bb-ink-muted);
+    cursor: default;
+    opacity: 0.6;
+  }
+  &.done:disabled {
+    color: var(--bb-success);
+    opacity: 1;
+  }
+}
+
 // Small links under a form step, e.g. "Resend code" and "Change details".
 .bb-form-links {
   display: flex;
@@ -1169,6 +1312,19 @@ np-time-picker .time-picker-field {
   font-weight: 600;
   cursor: pointer;
   text-decoration: underline;
+}
+
+// "← All customers": a detail page's link back to its list. On pages laid out as a grid, only the
+// text is the link.
+.bb-back-link {
+  justify-self: start;
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--bb-space-2);
+  color: inherit;
+  font-weight: 600;
+  --bb-icon-size: 18px;
 }
 
 // Role badge used in admin lists
@@ -1245,6 +1401,12 @@ np-time-picker .time-picker-field {
   @media (min-width: 600px) {
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
+}
+
+// "Clear filters" under a filtered list's empty state.
+.bb-list-clear {
+  margin: 0 0 var(--bb-space-5);
+  text-align: center;
 }
 
 // A card holding a list or table edge to edge, with a paginator at the bottom.
@@ -1446,10 +1608,25 @@ np-time-picker .time-picker-field {
   }
 }
 
+// Menus use the app's surface (white in light mode, the dark surface in dark mode), not
+// Material's tinted M3 container colour.
+.mat-mdc-menu-panel {
+  --mat-menu-container-color: var(--bb-surface);
+}
+
 // The customer account menu (header avatar). The panel lives in an overlay, so it is styled here.
+// Compact rows (40px, not 48px) and tighter dividers keep the long list shorter.
 .mat-mdc-menu-panel.bb-account-menu {
   width: 300px;
   max-width: calc(100vw - 32px);
+
+  .mat-mdc-menu-item {
+    min-height: 40px;
+  }
+
+  .mat-divider {
+    margin: 4px 0;
+  }
 }
 
 // Restaurant page on phones/tablets: the sticky "View cart" bar (~64px) sits on the tab bar, so
@@ -1601,4 +1778,21 @@ $text-button: '.mat-mdc-button-base:not(.mat-mdc-icon-button)';
       }
     }
   }
+}
+
+// A map is full screen (shared/components/map-frame): the page behind it stays put.
+body.bb-map-full-open {
+  overflow: hidden;
+}
+
+// Panel icon rail: a group's flyout menu. The pane and panel are Material's (outside the
+// component), so they are styled here; the menu's contents are in panel-shell.scss. The menu
+// starts over its icon (overlapTrigger) and the whole pane moves right, beside the 72px rail and
+// level with the icon, so nothing invisible covers the other rail icons.
+.cdk-overlay-pane:has(> .bb-rail-menu) {
+  margin-left: 62px;
+}
+
+.bb-rail-menu {
+  min-width: 220px;
 }

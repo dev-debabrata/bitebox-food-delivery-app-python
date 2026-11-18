@@ -1,7 +1,7 @@
 import { NpIconPipe } from '../../shared/icons/np-icon-name';
 import { IconComponent } from 'nexprime';
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { FormRoot, form, maxLength, pattern } from '@angular/forms/signals';
+import { form, maxLength } from '@angular/forms/signals';
 import { TitleCasePipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -26,17 +26,19 @@ import { CheckoutCoins } from './checkout-coins/checkout-coins';
 import { EmptyState } from '../../shared/components/empty-state/empty-state';
 import { QtyStepper } from '../../shared/components/qty-stepper/qty-stepper';
 import { VegBadge } from '../../shared/components/veg-badge/veg-badge';
-import { CouponOffer, DeliveryAddress } from '../../shared/models/checkout.models';
+import { CouponOffer, DeliveryAddress, PaymentChannel } from '../../shared/models/checkout.models';
 import { InrPipe, formatPaise } from '../../shared/pipes/money.pipes';
+import { BbDialog } from '../../shared/dialog/bb-dialog';
+import { openCoupons } from './coupon-dialog/coupon-dialog';
+import { codeApplier } from '../../shared/coupons/cart-offers';
+import { CouponTicket } from '../../shared/components/coupon-ticket/coupon-ticket';
 
 
-import { shownError } from '../../shared/forms/form-errors';
 import { NP_FORM_FIELDS } from '../../shared/forms/np-form-fields';
 
 @Component({
   selector: 'bb-checkout',
   imports: [
-    FormRoot,
     NP_FORM_FIELDS,
     RouterLink,
     MatButtonModule,
@@ -46,6 +48,7 @@ import { NP_FORM_FIELDS } from '../../shared/forms/np-form-fields';
     MatRadioModule,
     BillSummary,
     CheckoutCoins,
+    CouponTicket,
     EmptyState,
     QtyStepper,
     VegBadge,
@@ -63,6 +66,7 @@ export class Checkout {
   private readonly addresses = inject(AddressService);
   private readonly orders = inject(OrderService);
   private readonly dialog = inject(MatDialog);
+  private readonly bbDialog = inject(BbDialog);
   private readonly notify = inject(NotificationService);
   private readonly router = inject(Router);
   private readonly payments = inject(PaymentService);
@@ -72,18 +76,6 @@ export class Checkout {
   protected readonly loadError = signal<string | null>(null);
   protected readonly savedAddresses = signal<DeliveryAddress[]>([]);
   protected readonly offers = signal<CouponOffer[]>([]);
-  protected readonly shownError = shownError;
-  protected readonly couponForm = form(
-    signal({ code: '' }),
-    (path) => {
-      pattern(path.code, /^\s*[A-Za-z0-9_-]{3,30}\s*$/, {
-        message: 'Coupon codes are 3-30 letters or digits',
-      });
-    },
-    { submission: { action: async () => this.applyCoupon() } },
-  );
-  protected readonly couponError = signal<string | null>(null);
-  protected readonly applyingCoupon = signal(false);
   protected readonly noteForm = form(signal({ note: '' }), (path) => {
     maxLength(path.note, 300, { message: 'Keep the note under 300 characters' });
   });
@@ -94,7 +86,26 @@ export class Checkout {
   protected readonly onlineAvailable = computed(() =>
     this.methods().some((m) => m.method === 'online'),
   );
-  protected readonly paymentMethod = signal<PaymentMethod>('cod');
+  /** Cash, or the online channel (UPI, card, ...): the bill is priced with its payment offer. */
+  protected readonly payWith = computed(() => this.cart.paymentChannel() ?? 'cod');
+  protected readonly paymentMethod = computed<PaymentMethod>(() => (this.payWith() === 'cod' ? 'cod' : 'online'));
+  protected readonly channels: { value: PaymentChannel; label: string; icon: string }[] = [
+    { value: 'upi', label: 'UPI', icon: 'smartphone' },
+    { value: 'card', label: 'Credit or debit card', icon: 'credit-card' },
+    { value: 'netbanking', label: 'Net banking', icon: 'landmark' },
+    { value: 'wallet', label: 'Wallet', icon: 'wallet' },
+  ];
+
+  /** The best payment offer for each channel on this cart (the server's figures). */
+  protected readonly paymentOffers = computed(
+    () => new Map((this.cart.quote()?.paymentOffers ?? []).map((o) => [o.channel, o])),
+  );
+
+  /** Re-prices the cart for the chosen way to pay (a channel's payment offer joins the bill). */
+  protected choosePay(value: 'cod' | PaymentChannel): void {
+    this.cart.paymentChannel.set(value === 'cod' ? null : value);
+    this.cart.refresh().subscribe({ error: (err: unknown) => this.notify.error(errorMessage(err)) });
+  }
   protected readonly placing = signal(false);
   protected readonly placeError = signal<string | null>(null);
 
@@ -110,6 +121,7 @@ export class Checkout {
     if (location?.source === 'address' && location.addressId && !this.cart.selectedAddressId()) {
       this.cart.selectedAddressId.set(location.addressId);
     }
+    this.cart.paymentChannel.set(null); // priced for cash until the customer picks a channel
     this.cart.refresh().subscribe({
       next: (quote) => {
         this.loading.set(false);
@@ -129,25 +141,32 @@ export class Checkout {
       .subscribe({ next: (list) => this.offers.set(list), error: () => this.offers.set([]) });
   }
 
-  protected applyCoupon(code = this.couponForm.code().value()): void {
-    const value = code.trim();
-    if (!value) return;
-    this.applyingCoupon.set(true);
-    this.couponError.set(null);
-    this.cart.applyCoupon(value).subscribe({
-      next: (quote) => {
-        this.applyingCoupon.set(false);
-        this.couponForm().reset({ code: '' });
-        this.notify.success(
-          `${quote.coupon?.code} applied — you save ₹${(quote.pricing.discountPaise / 100).toFixed(0)}`,
-        );
-      },
-      error: (err: unknown) => {
-        this.couponError.set(errorMessage(err));
-        this.applyingCoupon.set(false);
-      },
-    });
+  /** The one restaurant offer on this cart (the best, or the one the customer picked). */
+  protected readonly restaurantOffer = computed(
+    () => this.cart.quote()?.restaurantOffers?.find((o) => o.applied) ?? null,
+  );
+
+  /** The server's best coupon for this cart, when it saves more than the applied one. */
+  protected readonly suggestion = computed(() => {
+    const q = this.cart.quote();
+    const best = q?.bestCoupon;
+    const extra = (best?.savingPaise ?? 0) - (q?.coupon?.discountPaise ?? 0);
+    if (!best || best.code === q?.coupon?.code || extra <= 0) return null;
+    const switching = !!q?.coupon;
+    const offer: CouponOffer = { kind: 'coupon', minOrderPaise: 0, validUntil: '', ...best };
+    return { offer, switching, line: `Save ${formatPaise(extra)}${switching ? ' more' : ''} on this order!` };
+  });
+
+  /** One tap on the suggested coupon (the server's pick for this cart). */
+  private readonly applier = codeApplier();
+  protected readonly applyBest = this.applier.apply;
+  protected readonly applying = this.applier.busy;
+
+  /** "Apply coupon": every coupon for this cart; the quote refreshes once one is applied. */
+  protected showCoupons(): void {
+    openCoupons(this.bbDialog, this.offers()).subscribe();
   }
+
 
   protected applyCoins(coins: number): void {
     this.cart.setCoins(coins).subscribe({
@@ -210,6 +229,7 @@ export class Checkout {
         {
           addressId,
           paymentMethod: this.paymentMethod(),
+          paymentChannel: this.cart.paymentChannel() ?? undefined,
           note: this.noteForm.note().value().trim() || undefined,
           expectedTotalPaise: quote.pricing.totalPaise,
         },
@@ -270,9 +290,4 @@ export class Checkout {
     return [a.line1, a.line2, a.area, a.city].filter(Boolean).join(', ');
   }
 
-  protected offerTitle(o: CouponOffer): string {
-    return o.discountType === 'percent'
-      ? `${o.discountValue}% off`
-      : `₹${o.discountValue / 100} off`;
-  }
 }

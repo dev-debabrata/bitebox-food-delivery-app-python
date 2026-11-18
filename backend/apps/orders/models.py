@@ -49,6 +49,15 @@ class PaymentMethod(models.TextChoices):
     ONLINE = "online"
 
 
+class PaymentChannel(models.TextChoices):
+    """How an online order is paid; payment offers can depend on it (cash orders have none)."""
+
+    UPI = "upi"
+    CARD = "card"
+    NETBANKING = "netbanking"
+    WALLET = "wallet"
+
+
 class PaymentStatus(models.TextChoices):
     PENDING = "pending"
     PAID = "paid"
@@ -86,8 +95,15 @@ class Order(BaseModel):
     coin_discount_paise = models.BigIntegerField(
         default=0
     )  # Node pricing.coinDiscountPaise (= coins.discountPaise)
+    # The delivery fee a free-delivery coupon waived (already left out of delivery_fee_paise).
+    delivery_discount_paise = models.BigIntegerField(default=0)
     total_paise = models.BigIntegerField()
     coupon_code = models.CharField(max_length=30, blank=True, default="")
+    # Every discount on the order, in the order they applied: kind, code, name, food_paise,
+    # delivery_paise and who funds it (apps/cart/services.py#build_quote).
+    discounts = models.JSONField(default=list, blank=True)
+    # The food discount the restaurant's own offers gave (funded by the restaurant; settlement).
+    restaurant_discount_paise = models.BigIntegerField(default=0)
 
     coins_redeemed = models.PositiveIntegerField(default=0)
     coins_state = models.CharField(max_length=10, choices=CoinState.choices, null=True, blank=True)
@@ -101,6 +117,9 @@ class Order(BaseModel):
     )
     status_changed_at = models.DateTimeField(auto_now_add=True)  # the sweeps time out from this
     payment_method = models.CharField(max_length=8, choices=PaymentMethod.choices)
+    payment_channel = models.CharField(
+        max_length=12, choices=PaymentChannel.choices, blank=True, default=""
+    )
     payment_status = models.CharField(
         max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PENDING
     )
@@ -136,6 +155,11 @@ class Order(BaseModel):
         constraints = [
             one_of("status", OrderStatus, "orders_status_valid"),
             one_of("payment_method", PaymentMethod, "orders_payment_method_valid"),
+            models.CheckConstraint(
+                condition=models.Q(payment_channel="")
+                | models.Q(payment_channel__in=PaymentChannel.values),
+                name="orders_payment_channel_valid",
+            ),
             one_of("payment_status", PaymentStatus, "orders_payment_status_valid"),
             *(
                 non_negative(f, f"orders_{f}_non_negative")

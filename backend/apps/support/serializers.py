@@ -11,7 +11,9 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from common.validation import PageQuery
+from apps.accounts.serializers import JoinedListQuery
+from common.fields import UUIDRef
+from common.filters import FacetQuery, MultiIdField, multi_choice
 
 from .models import RequesterRole, TicketPriority, TicketStatus, TicketType
 
@@ -157,8 +159,13 @@ class CreateTicketInput(serializers.Serializer):
     order_number = OrderNumberField()
 
 
-class MyTicketQuery(PageQuery):
-    status = choice(["open", "closed"], required=False)
+class MyTicketQuery(FacetQuery, JoinedListQuery):
+    """GET /support/tickets: status open (not resolved or closed yet), waiting_for_response,
+    closed (resolved or closed)."""
+
+    status = multi_choice(["open", "waiting_for_response", "closed"])
+    type = multi_choice(TicketType.values)
+    day_range = "created"
 
 
 class ReplyInput(serializers.Serializer):
@@ -168,12 +175,18 @@ class ReplyInput(serializers.Serializer):
 # ---------------------------------------------------------------------------
 # Support staff
 # ---------------------------------------------------------------------------
-class StaffTicketQuery(PageQuery):
-    status = choice([*TicketStatus.values, ACTIVE], required=False)
-    priority = choice(TicketPriority.values, required=False)
-    requester_role = choice(RequesterRole.values, required=False)
-    type = choice(TicketType.values, required=False)
-    assignee = choice(["me", "unassigned"], required=False)
+class StaffTicketQuery(FacetQuery, JoinedListQuery):
+    """GET /admin/support/tickets."""
+
+    # "active": every status not resolved or closed yet.
+    status = multi_choice([*TicketStatus.values, ACTIVE])
+    priority = multi_choice(TicketPriority.values)
+    requester_role = multi_choice(RequesterRole.values)
+    type = multi_choice(TicketType.values)
+    assignee = MultiIdField(keywords=("me", "unassigned"))  # or the assigned admins' ids
+    # Tickets one person raised (the admin customer profile).
+    requester = UUIDRef(message="Invalid value", required=False)
+    day_range = "created"
 
 
 class UpdateTicketInput(serializers.Serializer):
