@@ -1,0 +1,77 @@
+@if (user(); as u) {
+  <section class="bb-card" aria-labelledby="verify-title">
+    <header class="bb-card-head">
+      <span class="bb-card-head__icon"
+        ><np-icon name="shield-check" class="mat-icon" matButtonIcon
+      /></span>
+      <div>
+        <h3 id="verify-title">Verification</h3>
+        <p>Verified contacts keep your account safe and your updates arriving.</p>
+      </div>
+    </header>
+    <ul class="rows">
+      <li>
+        <span class="row-icon"><np-icon name="mail" class="mat-icon" matButtonIcon /></span>
+        <span class="what">
+          <strong>Email</strong>
+          <span class="bb-muted small">{{ u.email }}</span>
+        </span>
+        <span class="status">
+          @if (u.emailVerified) {
+            <span class="bb-badge tone-good">Verified</span>
+          } @else {
+            <span class="bb-badge tone-warn">Not verified</span>
+            <np-button
+              size="small"
+              variant="soft"
+              severity="secondary"
+              [label]="sendLabel('email')"
+              [disabled]="busy() === 'email' || timers.email.left() > 0"
+              (clicked)="sendCode('email')"
+            />
+          }
+        </span>
+      </li>
+      <li>
+        <span class="row-icon"><np-icon name="smartphone" class="mat-icon" matButtonIcon /></span>
+        <span class="what">
+          <strong>Mobile number</strong>
+          <span class="bb-muted small">{{ u.phone || 'Not added' }}</span>
+        </span>
+        <span class="status">
+          @if (!u.phone) {
+            <span class="bb-muted small">Add it under Personal details</span>
+          } @else if (u.phoneVerified) {
+            <span class="bb-badge tone-good">Verified</span>
+          } @else {
+            <span class="bb-badge tone-warn">Not verified</span>
+            <np-button
+              size="small"
+              variant="soft"
+              severity="secondary"
+              [label]="sendLabel('phone')"
+              [disabled]="busy() === 'phone' || timers.phone.left() > 0 || phoneCodes() === false"
+              (clicked)="sendCode('phone')"
+            />
+          }
+        </span>
+      </li>
+    </ul>
+
+    @if (phoneCodes() === false && u.phone && !u.phoneVerified) {
+      <p class="bb-muted small">Verification by SMS is not available yet.</p>
+    }
+    @if (pending(); as channel) {
+      <form class="code" [formRoot]="codeForm">
+        <bb-code-input [field]="codeForm.code" [label]="channel.codeLabel" />
+        <button type="submit" class="bb-btn" [disabled]="codeForm().submitting()">
+          {{ channel.confirmLabel }}
+        </button>
+        <p class="bb-muted small sent-to">
+          Sent to {{ channel.sentTo(u) }}. It expires in {{ expiresInMinutes() }}
+          {{ expiresInMinutes() === 1 ? 'minute' : 'minutes' }}.
+        </p>
+      </form>
+    }
+  </section>
+}

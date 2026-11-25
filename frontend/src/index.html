@@ -46,9 +46,191 @@
       href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
+    <!-- The phone app's launch splash (shown inside <app-root> until Angular renders the first page;
+         only in the installed app on a touch device, see app.ts#PHONE_APP).
+         Same box, lid and dashes as shared/components/brand-loader; plum like the manifest's
+         background_color, so the installed app goes from the phone's splash straight into it. -->
+    <style>
+      .bb-splash {
+        display: none;
+      }
+      @media (display-mode: standalone) and (pointer: coarse), (display-mode: fullscreen) and (pointer: coarse) {
+        .bb-splash {
+          display: flex;
+        }
+      }
+      .bb-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 10000;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom);
+        background: radial-gradient(circle at 50% 35%, #43295a 0%, #2e1a3d 60%);
+        color: #ffb52e;
+        font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+      }
+      /* A Lottie-style loop (box hop with squash and stretch, lid pop, steam, blink, sparkles).
+         Same as shared/components/brand-loader (keep the two alike). */
+      .bb-splash svg {
+        width: 120px;
+        height: 120px;
+        overflow: visible;
+      }
+      .bb-splash .hop,
+      .bb-splash .lid,
+      .bb-splash .eye,
+      .bb-splash .puff,
+      .bb-splash .spark,
+      .bb-splash .shadow {
+        transform-box: fill-box;
+      }
+      .bb-splash .hop {
+        transform-origin: 50% 100%;
+        animation: bb-hop 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+      }
+      .bb-splash .shadow {
+        transform-origin: 50% 50%;
+        animation: bb-shadow 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+      }
+      .bb-splash .lid {
+        transform-origin: 0% 100%;
+        animation: bb-lid 1.6s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+      }
+      .bb-splash .puff {
+        opacity: 0;
+        transform-origin: 50% 100%;
+        animation: bb-steam 1.6s ease-out infinite;
+      }
+      .bb-splash .p2 {
+        animation-delay: 0.08s;
+      }
+      .bb-splash .p3 {
+        animation-delay: 0.16s;
+      }
+      .bb-splash .eye {
+        transform-origin: 50% 50%;
+        animation: bb-blink 1.6s linear infinite;
+      }
+      .bb-splash .spark {
+        transform-origin: 50% 50%;
+        transform: scale(0);
+        animation: bb-twinkle 1.6s ease-in-out infinite;
+      }
+      .bb-splash .s2 {
+        animation-delay: 0.25s;
+      }
+      .bb-splash .s3 {
+        animation-delay: 0.5s;
+      }
+      .bb-splash__name {
+        font-size: 28px;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        color: #fff6e5;
+      }
+      .bb-splash__name b {
+        color: #ffb52e;
+      }
+      .bb-splash__dashes {
+        position: relative;
+        width: 96px;
+        height: 5px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgb(255 181 46 / 22%);
+      }
+      .bb-splash__dashes i {
+        position: absolute;
+        top: 0;
+        left: -18px;
+        width: 16px;
+        height: 100%;
+        border-radius: 999px;
+        background: #ffb52e;
+        animation: bb-dash 1.2s linear infinite;
+      }
+      .bb-splash__dashes i:nth-child(2) {
+        animation-delay: 0.4s;
+      }
+      .bb-splash__dashes i:nth-child(3) {
+        animation-delay: 0.8s;
+      }
+      @keyframes bb-hop {
+        0%, 100% { transform: translateY(0) scale(1.07, 0.93); }
+        14% { transform: translateY(0) scale(0.96, 1.05); }
+        42% { transform: translateY(-16px) scale(1, 1); }
+        70% { transform: translateY(0) scale(1.1, 0.9); }
+        82% { transform: translateY(0) scale(0.98, 1.02); }
+      }
+      @keyframes bb-shadow {
+        0%, 70%, 100% { transform: scale(1.08, 1); opacity: 1; }
+        42% { transform: scale(0.65, 0.8); opacity: 0.5; }
+      }
+      @keyframes bb-lid {
+        0%, 22%, 100% { transform: translateY(0) rotate(0); }
+        44%, 56% { transform: translateY(-9px) rotate(-26deg); }
+        74% { transform: translateY(0) rotate(3deg); }
+        84% { transform: translateY(0) rotate(0); }
+      }
+      @keyframes bb-steam {
+        0%, 36% { opacity: 0; transform: translateY(6px) scaleY(0.6); }
+        50% { opacity: 0.9; transform: translateY(0) scaleY(1); }
+        80%, 100% { opacity: 0; transform: translateY(-14px) scaleY(1.1); }
+      }
+      @keyframes bb-blink {
+        0%, 86%, 94%, 100% { transform: scaleY(1); }
+        90% { transform: scaleY(0.12); }
+      }
+      @keyframes bb-twinkle {
+        0%, 30%, 80%, 100% { transform: scale(0) rotate(0); opacity: 0; }
+        50% { transform: scale(1) rotate(45deg); opacity: 1; }
+      }
+      @keyframes bb-dash {
+        to { transform: translateX(132px); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .bb-splash .hop,
+        .bb-splash .shadow,
+        .bb-splash .lid,
+        .bb-splash .puff,
+        .bb-splash .eye,
+        .bb-splash .spark,
+        .bb-splash__dashes i {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body class="mat-typography">
-    <app-root ngCspNonce="CSP_NONCE"></app-root>
+    <app-root ngCspNonce="CSP_NONCE">
+      <div class="bb-splash" role="status" aria-label="Opening BiteBox">
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <ellipse class="shadow" cx="60" cy="108" rx="26" ry="5" fill="rgb(0 0 0 / 30%)" />
+          <g fill="#FFB52E">
+            <path class="spark s1" d="M20 40 l2 -6 l2 6 l6 2 l-6 2 l-2 6 l-2 -6 l-6 -2 z" />
+            <path class="spark s2" d="M98 30 l1.5 -4.5 l1.5 4.5 l4.5 1.5 l-4.5 1.5 l-1.5 4.5 l-1.5 -4.5 l-4.5 -1.5 z" />
+            <path class="spark s3" d="M100 74 l1.2 -3.6 l1.2 3.6 l3.6 1.2 l-3.6 1.2 l-1.2 3.6 l-1.2 -3.6 l-3.6 -1.2 z" />
+          </g>
+          <g class="hop">
+            <g fill="none" stroke="#FFE2A8" stroke-width="3" stroke-linecap="round">
+              <path class="puff p1" d="M48 40 q-4 -6 0 -12 q4 -6 0 -12" />
+              <path class="puff p2" d="M60 38 q-4 -6 0 -12 q4 -6 0 -12" />
+              <path class="puff p3" d="M72 40 q-4 -6 0 -12 q4 -6 0 -12" />
+            </g>
+            <rect x="30" y="58" width="60" height="40" rx="9" fill="#FFB52E" />
+            <rect class="lid" x="25" y="44" width="70" height="14" rx="5" fill="#FFB52E" />
+            <circle class="eye" cx="49" cy="72" r="3.2" fill="#2E1A3D" />
+            <circle class="eye" cx="71" cy="72" r="3.2" fill="#2E1A3D" />
+            <path d="M52 81 Q60 88 68 81" fill="none" stroke="#2E1A3D" stroke-width="3.4" stroke-linecap="round" />
+          </g>
+        </svg>
+        <div class="bb-splash__name">Bite<b>Box</b></div>
+        <span class="bb-splash__dashes" aria-hidden="true"><i></i><i></i><i></i></span>
+      </div>
+    </app-root>
     <noscript>BiteBox needs JavaScript to run. Please enable it in your browser settings.</noscript>
   </body>
 </html>

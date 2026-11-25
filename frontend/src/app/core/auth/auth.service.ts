@@ -23,7 +23,7 @@ import {
   retry,
 } from 'rxjs';
 import { environment } from '../../../environments/environment';
-import { ApiResponse } from '../../shared/models/api.models';
+import { ApiResponse } from '../models/api.models';
 import {
   AuthSession,
   CodeSent,
@@ -35,8 +35,8 @@ import {
   Role,
   UpdateProfileRequest,
   User,
-} from '../../shared/models/user.models';
-import { errorCode } from '../services/api-error';
+} from '../models/user.models';
+import { errorCode } from '../../shared/utils/api-error';
 import { inBackground } from '../services/page-loader';
 
 export interface SessionHint {
@@ -90,9 +90,10 @@ export class AuthService {
     });
   }
 
-  /** Admin permission check for menus and guards (the API enforces the real rule). */
-  can(permission: Permission): boolean {
-    return this.permissions().has(permission);
+  /** Admin permission check for menus and guards: holds any of them (the API enforces the real rule). */
+  can(...permissions: Permission[]): boolean {
+    const held = this.permissions();
+    return permissions.some((p) => held.has(p));
   }
 
   constructor() {

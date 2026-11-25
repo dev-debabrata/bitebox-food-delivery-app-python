@@ -1,4 +1,5 @@
 import { DatePipe, TitleCasePipe } from '@angular/common';
+import { DetailNav } from '../../../../shared/components/detail-nav/detail-nav';
 import {
   ChangeDetectionStrategy,
   Component,
@@ -25,7 +26,7 @@ import {
   AdminUsersService,
   UserProfilePatch,
 } from '../../../../core/services/admin/admin-users.service';
-import { errorMessage, fieldErrors } from '../../../../core/services/api-error';
+import { errorMessage, fieldErrors } from '../../../../shared/utils/api-error';
 import { NotificationService } from '../../../../core/services/notification.service';
 import { AdminOrdersService } from '../../../../core/services/order-management.service';
 import {
@@ -38,11 +39,11 @@ import { OrderStatusChip } from '../../../../shared/components/order-status-chip
 import { StatTile } from '../../../../shared/components/stat-tile/stat-tile';
 import { loaded } from '../../../../shared/coupons/coupon-list';
 import { BbDialog } from '../../../../shared/dialog/bb-dialog';
-import { birthDateRange, fromIsoDay, isoDay } from '../../../../shared/forms/dates';
+import { birthDateRange, fromIsoDay, isoDay } from '../../../../shared/utils/dates';
 import { serverErrors, shownError } from '../../../../shared/forms/form-errors';
-import { requiredText } from '../../../../shared/forms/form-rules';
+import { requiredText } from '../../../../shared/validators/form-rules';
 import { NP_FORM_FIELDS } from '../../../../shared/forms/np-form-fields';
-import { DeliveryAddress, customerStatusLabel } from '../../../../shared/models/checkout.models';
+import { DeliveryAddress, customerStatusLabel } from '../../../../core/models/checkout.models';
 import {
   GENDER_LABEL,
   Gender,
@@ -50,11 +51,13 @@ import {
   ROLE_META,
   USER_STATUS_META,
   User,
-} from '../../../../shared/models/user.models';
-import { openAccountStatus, statusChanged } from '../../../../shared/components/account-status-dialog/account-status-dialog';
+} from '../../../../core/models/user.models';
+import {
+  openAccountStatus,
+  statusChanged,
+} from '../../../../shared/components/account-status-dialog/account-status-dialog';
 import { ImageUpload } from '../../../../shared/components/image-upload/image-upload';
 import { InrPipe } from '../../../../shared/pipes/money.pipes';
-import { openAdminOrder } from '../../orders/admin-order-dialog/admin-order-dialog';
 
 const RECENT_ORDERS = 5;
 
@@ -65,6 +68,16 @@ const profileOf = (u: User | undefined) => ({
   birthDate: fromIsoDay(u?.birthDate),
 });
 
+/** A member's role → its kind in permission names (e.g. `restaurants:edit`). */
+const KIND = { customer: 'customers', restaurant: 'restaurants', delivery: 'riders' } as const;
+
+/** Where a person's page leads back to, by role. */
+const BACK = {
+  customer: '/admin/customers',
+  restaurant: '/admin/restaurant-accounts',
+  delivery: '/admin/delivery-partner-accounts',
+};
+
 /**
  * One customer, restaurant partner or rider: profile, order totals, saved addresses and recent
  * orders. /admin/users/:id shows it; /admin/users/:id/edit edits the name, date of birth and
@@ -74,6 +87,7 @@ const profileOf = (u: User | undefined) => ({
 @Component({
   selector: 'bb-admin-user-detail',
   imports: [
+    DetailNav,
     DatePipe,
     TitleCasePipe,
     RouterLink,
@@ -104,10 +118,21 @@ export class AdminUserDetail {
   readonly id = input.required<string>();
   /** Route data: true on the edit page. */
   readonly edit = input(false, { transform: booleanAttribute });
-  /** Route data: the list this page belongs to (Customers or Users). */
-  readonly base = input('/admin/users');
+  /**
+   * Route data: where this page lives (/admin/customers, or /admin/users for any account).
+   * Routes without it bind `undefined`, which would override a plain default, hence the transform.
+   */
+  readonly base = input('/admin/users', {
+    transform: (v: string | undefined) => v ?? '/admin/users',
+  });
 
   protected readonly roleMeta = ROLE_META;
+  /** "← All …": the page's own list, or the list for this person's role. */
+  protected readonly back = computed(() => {
+    if (this.base() === '/admin/customers') return BACK.customer;
+    const role = this.data()?.user.role;
+    return role && role in BACK ? BACK[role as keyof typeof BACK] : BACK.customer;
+  });
   protected readonly statusMeta = USER_STATUS_META;
   protected readonly genderLabel = GENDER_LABEL;
   protected readonly fromIsoDay = fromIsoDay;
@@ -125,12 +150,21 @@ export class AdminUserDetail {
     this.detail.error() ? errorMessage(this.detail.error(), 'Could not load this user.') : null,
   );
   protected readonly isCustomer = computed(() => this.data()?.user.role === 'customer');
+  /** The person's kind in permissions ("customers", "restaurants", "riders"). */
+  private readonly kind = computed(
+    () => KIND[this.data()?.user.role as keyof typeof KIND] ?? 'customers',
+  );
+  /** Buttons only for what this admin may do with this kind of account. */
+  protected readonly canEdit = computed(() => this.auth.can(`${this.kind()}:edit`));
+  protected readonly canSetStatus = computed(() =>
+    this.auth.can(`${this.kind()}:status`, 'accounts:suspend'),
+  );
 
   // Customers: a tab per part of the account; record tabs only with that area's permission.
   // Each tab lists a different kind of record, so the list holds them loosely typed.
   protected readonly tab = linkedSignal<string>(() => (this.edit() ? 'profile' : 'overview'));
   protected readonly records = recordTabs(this.tab, (t) => [
-    t.orders('customer', this.id, () => this.recent.reload()),
+    t.orders('customer', this.id),
     t.payments(this.id),
     t.coins(this.id),
     t.reviews('customer', this.id),
@@ -141,7 +175,12 @@ export class AdminUserDetail {
   protected readonly tabs = computed(() => [
     { id: 'overview', label: 'Overview', content: '' },
     { id: 'profile', label: 'Personal info', content: '' },
-    { id: 'addresses', label: 'Addresses', content: '', badge: this.data()?.addresses.length || undefined },
+    {
+      id: 'addresses',
+      label: 'Addresses',
+      content: '',
+      badge: this.data()?.addresses.length || undefined,
+    },
     ...this.records.strip(),
   ]);
   /** Non-customers have no tabs: every section shows at once. */
@@ -234,7 +273,7 @@ export class AdminUserDetail {
   }
 
   protected openOrder(orderId: string): void {
-    openAdminOrder(this.bbDialog, orderId).subscribe(() => this.recent.reload());
+    void this.router.navigate(['/admin/orders', orderId]);
   }
 
   // Addresses (edit page): the customer's own address dialog, saving to the admin API.

@@ -1,0 +1,76 @@
+import { DatePipe } from '@angular/common';
+import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
+import { rxResource } from '@angular/core/rxjs-interop';
+import { FormRoot, TreeValidationResult, form } from '@angular/forms/signals';
+import { MatButtonModule } from '@angular/material/button';
+import { RouterLink } from '@angular/router';
+import { IconComponent } from 'nexprime';
+import { EMPTY, catchError, firstValueFrom, tap, throwError } from 'rxjs';
+import { pollWhileVisible } from '../../../../core/services/poll';
+import { errorMessage, resourceError } from '../../../utils/api-error';
+import { NotificationService } from '../../../../core/services/notification.service';
+import { SupportService } from '../../../../core/services/support.service';
+import { requiredText } from '../../../validators/form-rules';
+import { NP_FORM_FIELDS } from '../../../forms/np-form-fields';
+import {
+  TICKET_STATUS_LABEL,
+  TICKET_STATUS_TONE,
+  TICKET_TYPE_LABEL,
+} from '../../../../core/models/admin-roles.models';
+import { supportBase } from '../support-base';
+
+@Component({
+  selector: 'bb-my-ticket',
+  imports: [DatePipe, RouterLink, FormRoot, NP_FORM_FIELDS, MatButtonModule, IconComponent],
+  templateUrl: './my-ticket.html',
+  styleUrl: './my-ticket.scss',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class MyTicket {
+  private readonly api = inject(SupportService);
+  private readonly notify = inject(NotificationService);
+  protected readonly base = supportBase();
+  protected readonly statusLabel = TICKET_STATUS_LABEL;
+  protected readonly statusTone = TICKET_STATUS_TONE;
+  protected readonly typeLabel = TICKET_TYPE_LABEL;
+
+  /** Route parameter. */
+  readonly id = input.required<string>();
+
+  /** The conversation, re-read every 15 s while the tab is visible so support replies appear
+   * like a chat. Only the first load can fail the page; a failed refresh waits for the next. */
+  protected readonly ticket = rxResource({
+    params: () => this.id(),
+    stream: ({ params }) => {
+      let loaded = false;
+      return pollWhileVisible(
+        () =>
+          this.api.get(params).pipe(
+            tap(() => (loaded = true)),
+            catchError((err) => (loaded ? EMPTY : throwError(() => err))),
+          ),
+        15_000,
+      );
+    },
+  });
+  protected readonly error = resourceError(this.ticket, 'Could not load this ticket.');
+
+  protected readonly reply = signal({ body: '' });
+  protected readonly replyForm = form(
+    this.reply,
+    (path) => requiredText(path.body, 'Message', { min: 2, max: 2000 }),
+    { submission: { action: () => this.send() } },
+  );
+
+  private async send(): Promise<TreeValidationResult> {
+    try {
+      this.ticket.set(await firstValueFrom(this.api.reply(this.id(), this.reply().body.trim())));
+      this.reply.set({ body: '' });
+      this.replyForm().reset();
+      this.notify.success('Reply sent');
+    } catch (err) {
+      this.notify.error(errorMessage(err));
+    }
+    return undefined;
+  }
+}

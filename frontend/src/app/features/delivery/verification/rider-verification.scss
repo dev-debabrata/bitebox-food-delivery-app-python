@@ -1,0 +1,22 @@
+:host {
+  display: grid;
+  gap: var(--bb-space-4);
+}
+
+.state {
+  margin: 0; // the layout's gap spaces it (.bb-alert has its own bottom margin)
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--bb-space-2) var(--bb-space-3);
+
+  > span {
+    flex: 1;
+    min-width: 220px;
+  }
+}
+
+.reason {
+  display: block;
+  margin-top: 4px;
+}

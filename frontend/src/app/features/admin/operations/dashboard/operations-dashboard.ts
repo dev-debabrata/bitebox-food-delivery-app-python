@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
+import { AuthService } from '../../../../core/auth/auth.service';
 import { RouterLink } from '@angular/router';
 import { IconComponent } from 'nexprime';
 import { OperationsService } from '../../../../core/services/admin/operations.service';
@@ -7,7 +8,7 @@ import { StatTile } from '../../../../shared/components/stat-tile/stat-tile';
 import { ReviewShortcuts } from '../../review-shortcuts/review-shortcuts';
 import { NP_FORM_FIELDS } from '../../../../shared/forms/np-form-fields';
 import { periodReport } from '../../../../shared/list/period-report';
-import { ORDER_STATUS_LABEL, OrderStatus } from '../../../../shared/models/checkout.models';
+import { ORDER_STATUS_LABEL, OrderStatus } from '../../../../core/models/checkout.models';
 
 const LIVE_ORDER: OrderStatus[] = [
   'pending',
@@ -29,6 +30,7 @@ const LIVE_ORDER: OrderStatus[] = [
 })
 export class OperationsDashboardPage {
   private readonly api = inject(OperationsService);
+  protected readonly auth = inject(AuthService);
   protected readonly report = periodReport(
     (days) => this.api.dashboard(days),
     'Could not load the dashboard.',

@@ -3,7 +3,7 @@ import { Router } from '@angular/router';
 import { Observable, catchError, filter, switchMap, throwError } from 'rxjs';
 import { confirmed } from '../../shared/components/confirm-dialog/confirm-dialog';
 import { AuthService } from '../auth/auth.service';
-import { errorCode, errorMessage } from './api-error';
+import { errorCode, errorMessage } from '../../shared/utils/api-error';
 import { CartService } from './cart.service';
 import { NotificationService } from './notification.service';
 import { BbDialog } from '../../shared/dialog/bb-dialog';
@@ -45,6 +45,24 @@ export class CartActions {
   setQuantity(foodItemId: string, quantity: number): void {
     this.cart
       .setQuantity(foodItemId, quantity)
+      .subscribe({ error: (err: unknown) => this.notify.error(errorMessage(err)) });
+  }
+
+  /** Empties the cart after the customer confirms. */
+  clear(): void {
+    confirmed(
+      this.bbDialog,
+      {
+        title: 'Clear your cart?',
+        message: 'All dishes will be removed from your cart.',
+        confirmLabel: 'Clear cart',
+      },
+      '420px',
+    )
+      .pipe(
+        filter((ok) => ok === true),
+        switchMap(() => this.cart.clear()),
+      )
       .subscribe({ error: (err: unknown) => this.notify.error(errorMessage(err)) });
   }
 

@@ -1,6 +1,4 @@
-<a class="bb-back-link" routerLink="/admin/restaurant-accounts"
-  ><np-icon name="arrow-left" class="mat-icon" matButtonIcon />All restaurant accounts</a
->
+<bb-detail-nav [id]="id()" backLink="/admin/restaurant-accounts" />
 
 @if (loadError(); as message) {
   <div class="bb-alert error" role="alert">
@@ -17,12 +15,15 @@
       }
     </span>
     <div class="who">
-      <h1>{{ r.name }} <span class="id">{{ shortId(r.id) }}</span></h1>
-      <span class="bb-badge {{ statusTone[r.status] }}">{{ statusLabel[r.status] }}</span>
-      <span class="bb-badge {{ kycMeta[d.kyc.status].tone }}">KYC: {{ kycMeta[d.kyc.status].label }}</span>
-      @if (r.status === 'approved') {
-        <span class="bb-badge" [class.tone-good]="r.isAcceptingOrders">{{ r.isAcceptingOrders ? 'Taking orders' : 'Closed for orders' }}</span>
-      }
+      <h1>{{ r.name }}</h1>
+      <div class="chips">
+        <span class="bb-badge {{ statusTone[r.status] }}">{{ statusLabel[r.status] }}</span>
+        <span class="bb-badge {{ kycMeta[d.kyc.status].tone }}">KYC: {{ kycMeta[d.kyc.status].label }}</span>
+        @if (r.status === 'approved') {
+          <span class="bb-badge" [class.tone-good]="r.isAcceptingOrders">{{ r.isAcceptingOrders ? 'Taking orders' : 'Closed for orders' }}</span>
+        }
+        <span class="id" title="Restaurant ID">{{ shortId(r.id) }}</span>
+      </div>
       @if (r.statusReason && r.status !== 'approved') {
         <p class="bb-muted small reason">{{ r.statusReason }}</p>
       }
@@ -133,7 +134,7 @@
       <section class="bb-card">
         <div class="section-head">
           <h2>Owner</h2>
-          @if (d.owner && (auth.can('restaurants:status') || auth.can('accounts:suspend'))) {
+          @if (d.owner && (auth.can('restaurants:status', 'accounts:suspend'))) {
             <button type="button" class="bb-btn bb-btn--outlined bb-btn--small" (click)="changeOwnerStatus()">
               <np-icon name="shield-alert" class="mat-icon" matButtonIcon />Account status
             </button>
@@ -172,7 +173,7 @@
           <p class="bb-muted small">
             Bank details and documents are changed by the owner and checked again here; admins can't edit them.
           </p>
-          <bb-kyc-review [partnerId]="o.id" [canReview]="auth.can('restaurants:kyc') || auth.can('restaurants:manage')" (changed)="account.reload()" />
+          <bb-kyc-review [partnerId]="o.id" [canReview]="auth.can('restaurants:kyc', 'restaurants:manage')" (changed)="account.reload()" />
         </section>
       }
     }

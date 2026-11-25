@@ -1,12 +1,18 @@
-import { NpIconPipe } from '../../../shared/icons/np-icon-name';
+import { NpIconPipe } from '../../pipes/np-icon-name';
 import { IconComponent } from 'nexprime';
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { BB_DIALOG_DATA, BB_DIALOG_TITLE_ID, BbDialog, BbDialogRef } from '../../dialog/bb-dialog';
-import { CheckoutSession } from '../../models/payment.models';
+import { lockDialog } from '../../dialog/outside-click';
+import { CheckoutSession } from '../../../core/models/payment.models';
 import { InrPipe } from '../../pipes/money.pipes';
 
 type GatewayMethod = 'upi' | 'card' | 'netbanking' | 'wallet';
 export type PaymentOutcome = 'success' | 'failure';
+/** What the tester chose: the outcome, and whether to save the (new) test card. */
+export interface MockPaymentResult {
+  outcome: PaymentOutcome;
+  saveCard: boolean;
+}
 
 const METHODS: { id: GatewayMethod; label: string; icon: string; hint: string; detail: string }[] =
   [
@@ -49,24 +55,29 @@ const METHODS: { id: GatewayMethod; label: string; icon: string; hint: string; d
 })
 export class MockPaymentDialog {
   protected readonly session = inject<CheckoutSession>(BB_DIALOG_DATA);
-  protected readonly ref = inject<BbDialogRef<PaymentOutcome>>(BbDialogRef);
+  protected readonly ref = inject<BbDialogRef<MockPaymentResult>>(BbDialogRef);
   protected readonly titleId = inject(BB_DIALOG_TITLE_ID, { optional: true });
 
   protected readonly methods = METHODS;
   protected readonly method = signal<GatewayMethod>('upi');
   protected readonly selected = computed(() => METHODS.find((m) => m.id === this.method())!);
   protected readonly processing = signal(false);
+  /** Card: a saved test card (its id) or 'new'; a new one can be saved for next time. */
+  protected readonly savedCards = this.session.savedCards ?? [];
+  protected readonly card = signal(this.savedCards[0]?.id ?? 'new');
+  protected readonly saveCard = signal(false);
 
   protected finish(outcome: PaymentOutcome): void {
     this.processing.set(true);
-    this.ref.disableClose = true; // no closing half-way through "processing"
-    setTimeout(() => this.ref.close(outcome), 700);
+    lockDialog(this.ref); // no closing half-way through "processing"
+    const saveCard = this.method() === 'card' && this.card() === 'new' && this.saveCard();
+    setTimeout(() => this.ref.close({ outcome, saveCard }), 700);
   }
 }
 
 /** The simulated gateway; emits the outcome, or `undefined` when closed without paying. */
 export const openMockPayment = (dialog: BbDialog, session: CheckoutSession) =>
-  dialog.open<MockPaymentDialog, CheckoutSession, PaymentOutcome>(MockPaymentDialog, {
+  dialog.open<MockPaymentDialog, CheckoutSession, MockPaymentResult>(MockPaymentDialog, {
     data: session,
     width: '440px',
     panelClass: 'bb-gateway-dialog',

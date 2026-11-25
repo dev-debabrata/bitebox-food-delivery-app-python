@@ -66,30 +66,6 @@ def status_permission(target_role: str, status: str) -> Permission | None:
     return member_permission(target_role, "status")
 
 
-def list_users(roles: tuple[Role, ...], query: dict[str, Any], page: Page) -> dict[str, Any]:
-    """A page of accounts with one of `roles` (or just query["role"]), newest first."""
-    qs = (
-        User.objects.filter(role=query["role"])
-        if query.get("role")
-        else User.objects.filter(role__in=roles)
-    )
-    if query.get("status"):
-        qs = qs.filter(status=query["status"])
-    if search := (query.get("search") or "").strip():
-        qs = qs.filter(
-            Q(name__icontains=search) | Q(email__icontains=search) | Q(phone__icontains=search)
-        )
-    items, meta = paginate(qs.order_by("-created_at"), page)
-    return {"items": [user_json(u) for u in items], "pagination": meta}
-
-
-def list_members(actor: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
-    """Only the kinds of member this admin may view; asking for another kind is a 403."""
-    roles = viewable_roles(actor)
-    require(bool(roles) and (not query.get("role") or query["role"] in roles))
-    return list_users(roles, query, page)
-
-
 USER_STATUS_FACET = Facet("status", values=UserStatus.values)
 STAFF_FACETS = (Facet("role", values=ADMIN_ROLE_VALUES), USER_STATUS_FACET)
 
@@ -448,6 +424,24 @@ def id_search(search: str) -> Q:
         return Q(id__endswith=hex_id) if _ID_SUFFIX.match(hex_id) else Q(pk__in=[])
 
 
+# --- every member (the Users page) ---------------------------------------------------------------
+def list_members(actor: User, query: dict[str, Any], page: Page) -> dict[str, Any]:
+    """
+    Customers, restaurant partners and riders this admin may view (another kind is a 403), newest
+    first; `role`, `status` and `search` narrow it. The admin dashboard counts each role with it.
+    """
+    roles = viewable_roles(actor)
+    role = query.get("role")
+    require(bool(roles) and (not role or role in roles))
+    qs = User.objects.filter(role__in=[role] if role else roles)
+    if query.get("status"):
+        qs = qs.filter(status=query["status"])
+    if search := (query.get("search") or "").strip():
+        qs = qs.filter(person_search(search) | id_search(search))
+    items, meta = paginate(qs.order_by(*ACCOUNT_SORTS["newest"]), page)
+    return {"items": [user_json(u) for u in items], "pagination": meta}
+
+
 CUSTOMER_FACETS = (
     USER_STATUS_FACET,
     # The four values overlap (a customer is email_verified and phone_unverified...).
@@ -455,12 +449,18 @@ CUSTOMER_FACETS = (
 )
 
 
-def _customers(query: dict[str, Any]) -> QuerySet[User]:
-    qs = apply_facets(User.objects.filter(role=Role.CUSTOMER), query, CUSTOMER_FACETS)
-    qs = qs.filter(joined_between(query))
+def _accounts(
+    qs: QuerySet[User], query: dict[str, Any], specs: tuple[Facet, ...]
+) -> QuerySet[User]:
+    """`qs` narrowed by the facets, the joined days and the search (name, email, phone or id)."""
+    qs = apply_facets(qs, query, specs).filter(joined_between(query))
     if search := (query.get("search") or "").strip():
         qs = qs.filter(person_search(search) | id_search(search))
     return qs
+
+
+def _customers(query: dict[str, Any]) -> QuerySet[User]:
+    return _accounts(User.objects.filter(role=Role.CUSTOMER), query, CUSTOMER_FACETS)
 
 
 def list_customers(query: dict[str, Any], page: Page) -> dict[str, Any]:

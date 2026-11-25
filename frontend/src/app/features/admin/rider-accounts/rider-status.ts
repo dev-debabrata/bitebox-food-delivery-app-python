@@ -1,4 +1,4 @@
-import { RiderVerificationStatus } from '../../../shared/models/order-management.models';
+import { RiderVerificationStatus } from '../../../core/models/order-management.models';
 
 /** Verification decisions an admin can make for a rider in each status (review page and Delivery partner accounts). */
 /** Anything but approving needs a reason, which the rider sees. */
@@ -34,4 +34,4 @@ export const DECISIONS: Record<RiderVerificationStatus, Decision[]> = {
 
 /** "Online", "On a delivery" or "Offline". */
 export const availabilityOf = (r: { isOnline: boolean; busy?: boolean }) =>
-  r.busy ? { label: 'On a delivery', tone: 'tone-info' } : r.isOnline ? { label: 'Online', tone: 'tone-good' } : { label: 'Offline', tone: '' };
+  r.busy ? { label: 'On a delivery', tone: 'tone-info' } : r.isOnline ? { label: 'Online', tone: 'tone-good' } : { label: 'Offline', tone: 'tone-muted' };

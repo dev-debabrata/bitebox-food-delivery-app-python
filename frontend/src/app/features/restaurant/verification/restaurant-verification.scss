@@ -1,0 +1,10 @@
+:host {
+  display: grid;
+  gap: var(--bb-space-4);
+}
+
+.empty {
+  display: grid;
+  gap: var(--bb-space-3);
+  justify-items: start;
+}

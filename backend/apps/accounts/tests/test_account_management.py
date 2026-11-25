@@ -89,8 +89,9 @@ def test_every_non_active_status_blocks_sign_in_and_ends_sessions(
     assert not Session.objects.filter(user=customer, revoked_at__isnull=True).exists()
     refused = login(customer.email, make.PASSWORD)
     assert refused.status_code == 403
-    assert refused.json()["error"]["code"] == "FORBIDDEN"
-    assert refused.json()["message"] == message
+    assert refused.json()["error"]["code"] == "ACCOUNT_BLOCKED"
+    assert refused.json()["message"] == f"{message}. Reason: {REASON}"
+    assert field_errors(refused) == {"status": status, "reason": REASON}
 
 
 def test_reactivation_clears_the_reason_and_lets_the_person_back_in() -> None:
@@ -294,6 +295,23 @@ def test_an_operator_with_customers_view_sees_customers_only() -> None:
     assert c.patch(f"/api/v1/admin/users/{customer.pk}", {"name": "New Name"}).status_code == 403
 
 
+def test_users_list_narrows_by_role_status_and_search() -> None:
+    admin, _ = as_role()
+    make.user(name="Asha Customer")
+    rider = make.user(Role.DELIVERY, name="Bina Rider", status="suspended")
+    make.user(Role.RESTAURANT, name="Chef Restaurant")
+
+    def names(query: str) -> list[str]:
+        res = admin.get(f"/api/v1/admin/users?{query}")
+        assert res.status_code == 200, res.json()
+        return [u["name"] for u in res.json()["data"]["items"]]
+
+    assert names("role=delivery") == ["Bina Rider"]
+    assert names("status=suspended") == ["Bina Rider"]
+    assert names(f"search=%23{str(rider.pk)[-8:]}") == ["Bina Rider"]
+    assert admin.get("/api/v1/admin/users?status=gone").status_code == 422
+
+
 def test_permission_changes_apply_on_the_next_request() -> None:
     admin, _ = as_role()
     c, staff = operator()
@@ -398,6 +416,7 @@ def test_the_permission_catalogue() -> None:
         "key": "restaurants:approve",
         "label": "Approve restaurants",
         "group": "Restaurants",
+        "requires": ["restaurants:view"],
     } in (data["permissions"])
     presets = {p["key"]: p for p in data["presets"]}
     assert set(presets) == {"support", "restaurant", "delivery", "kyc", "finance"}

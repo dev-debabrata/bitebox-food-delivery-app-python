@@ -1,12 +1,11 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input } from '@angular/core';
+import { DetailNav } from '../../../../shared/components/detail-nav/detail-nav';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { RouterLink } from '@angular/router';
-import { IconComponent } from 'nexprime';
 import { AdminRestaurantStore } from '../../../../core/services/admin/admin-restaurant-accounts.service';
 import { MyRestaurantService } from '../../../../core/services/my-restaurant.service';
 import { loaded } from '../../../../shared/coupons/coupon-list';
-import { RestaurantDetails } from '../../../restaurant-panel/details/restaurant-details';
-import { RestaurantLegalForm } from '../../../restaurant-panel/verification/legal-form/restaurant-legal-form';
+import { RestaurantDetails } from '../../../../shared/components/restaurant-details/restaurant-details';
+import { RestaurantLegalForm } from '../../../../shared/components/restaurant-legal-form/restaurant-legal-form';
 
 /**
  * Edit a restaurant account: the partner's own details and legal forms, saving through the admin
@@ -14,7 +13,7 @@ import { RestaurantLegalForm } from '../../../restaurant-panel/verification/lega
  */
 @Component({
   selector: 'bb-restaurant-account-edit',
-  imports: [RouterLink, IconComponent, RestaurantDetails, RestaurantLegalForm],
+  imports: [DetailNav, RestaurantDetails, RestaurantLegalForm],
   providers: [{ provide: MyRestaurantService, useClass: AdminRestaurantStore }],
   templateUrl: './restaurant-account-edit.html',
   styleUrl: './restaurant-account-edit.scss',

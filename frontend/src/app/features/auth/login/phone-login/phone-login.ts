@@ -5,14 +5,16 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { IconComponent } from 'nexprime';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../../../core/auth/auth.service';
-import { errorMessage, fieldErrors } from '../../../../core/services/api-error';
+import { errorMessage, fieldErrors } from '../../../../shared/utils/api-error';
+import { BbDialog } from '../../../../shared/dialog/bb-dialog';
+import { showAccountBlocked } from '../account-blocked-dialog/account-blocked-dialog';
 import { PhoneInput } from '../../../../shared/components/phone-input/phone-input';
-import { codeRules } from '../../../../shared/forms/code-rules';
-import { countdown } from '../../../../shared/forms/countdown';
+import { codeRules } from '../../../../shared/validators/code-rules';
+import { countdown } from '../../../../shared/utils/countdown';
 import { serverErrors, shownError } from '../../../../shared/forms/form-errors';
-import { phoneRules } from '../../../../shared/forms/form-rules';
+import { phoneRules } from '../../../../shared/validators/form-rules';
 import { NP_FORM_FIELDS } from '../../../../shared/forms/np-form-fields';
-import { User } from '../../../../shared/models/user.models';
+import { User } from '../../../../core/models/user.models';
 
 /**
  * Sign in with a mobile number: the API texts a 6-digit code (5 minutes, 5 tries), which signs
@@ -33,6 +35,7 @@ import { User } from '../../../../shared/models/user.models';
 })
 export class PhoneLogin {
   private readonly auth = inject(AuthService);
+  private readonly dialog = inject(BbDialog);
   readonly signedIn = output<User>();
 
   protected readonly step = signal<'phone' | 'code'>('phone');
@@ -83,6 +86,7 @@ export class PhoneLogin {
       this.signedIn.emit(user);
       return undefined;
     } catch (err) {
+      if (showAccountBlocked(this.dialog, err)) return undefined;
       this.error.set(errorMessage(err, 'Could not sign in. Please try again.'));
       return serverErrors(this.codeForm, fieldErrors(err));
     }

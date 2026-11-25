@@ -1,4 +1,5 @@
 import { DatePipe, TitleCasePipe } from '@angular/common';
+import { DetailNav } from '../../../../shared/components/detail-nav/detail-nav';
 import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { RouterLink } from '@angular/router';
@@ -8,7 +9,7 @@ import { Observable } from 'rxjs';
 import { AuthService } from '../../../../core/auth/auth.service';
 import { AdminRestaurantAccountsService } from '../../../../core/services/admin/admin-restaurant-accounts.service';
 import { AdminUsersService } from '../../../../core/services/admin/admin-users.service';
-import { errorMessage } from '../../../../core/services/api-error';
+import { errorMessage } from '../../../../shared/utils/api-error';
 import { NotificationService } from '../../../../core/services/notification.service';
 import { openAccountStatus } from '../../../../shared/components/account-status-dialog/account-status-dialog';
 import { confirmed } from '../../../../shared/components/confirm-dialog/confirm-dialog';
@@ -17,9 +18,9 @@ import { RecordTable } from '../../../../shared/components/record-table/record-t
 import { StatTile } from '../../../../shared/components/stat-tile/stat-tile';
 import { loaded } from '../../../../shared/coupons/coupon-list';
 import { BbDialog } from '../../../../shared/dialog/bb-dialog';
-import { Restaurant, WEEK_DAYS } from '../../../../shared/models/catalog.models';
-import { USER_STATUS_META } from '../../../../shared/models/user.models';
-import { kindLabel } from '../../../../shared/models/kyc.models';
+import { Restaurant, WEEK_DAYS } from '../../../../core/models/catalog.models';
+import { USER_STATUS_META } from '../../../../core/models/user.models';
+import { kindLabel } from '../../../../core/models/kyc.models';
 import { ClockTimePipe } from '../../../../shared/pipes/clock-time.pipe';
 import { InrPipe } from '../../../../shared/pipes/money.pipes';
 import { shortId } from '../../account-list';
@@ -42,6 +43,7 @@ import {
 @Component({
   selector: 'bb-restaurant-account',
   imports: [
+    DetailNav,
     DatePipe,
     TitleCasePipe,
     RouterLink,
@@ -109,7 +111,7 @@ export class RestaurantAccount {
     ...(this.canSeeKyc() ? [{ id: 'kyc', label: 'KYC & bank', content: '', badge: kycBadge(this.data()?.kyc.status) }] : []),
     ...this.records.strip(),
   ]);
-  protected readonly canSeeKyc = computed(() => this.auth.can('restaurants:kyc') || this.auth.can('restaurants:manage'));
+  protected readonly canSeeKyc = computed(() => this.auth.can('restaurants:kyc', 'restaurants:manage'));
 
   protected act(action: StatusAction): void {
     const r = this.data()!.restaurant;

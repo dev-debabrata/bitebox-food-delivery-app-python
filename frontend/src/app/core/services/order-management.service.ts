@@ -2,9 +2,9 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable, map } from 'rxjs';
 import { environment } from '../../../environments/environment';
-import { ApiResponse } from '../../shared/models/api.models';
+import { ApiResponse } from '../models/api.models';
 import { Faceted, ListQuery } from '../../shared/list/filtered-list';
-import { Order, VehicleType } from '../../shared/models/checkout.models';
+import { Order, VehicleType } from '../models/checkout.models';
 import {
   AdminOrder,
   AdminOrderList,
@@ -22,8 +22,8 @@ import {
   RiderReviewState,
   RiderVerificationStatus,
   RiderStats,
-} from '../../shared/models/order-management.models';
-import { toParams } from './http-params';
+} from '../models/order-management.models';
+import { toParams } from '../../shared/utils/http-params';
 
 @Injectable({ providedIn: 'root' })
 export class RestaurantOrdersService {
@@ -232,11 +232,16 @@ export class AdminOrdersService {
       .pipe(map((r) => r.data));
   }
 
-  setRiderStatus(id: string, status: 'active' | 'suspended'): Observable<AdminRider['status']> {
+  /** A reason (shown to the rider) is required for anything but `active`. */
+  setRiderStatus(
+    id: string,
+    status: 'active' | 'suspended',
+    reason?: string,
+  ): Observable<AdminRider['status']> {
     return this.http
       .patch<ApiResponse<{ user: { status: AdminRider['status'] } }>>(
         `${this.api}/delivery-partners/${encodeURIComponent(id)}/status`,
-        { status },
+        { status, ...(reason ? { reason } : {}) },
       )
       .pipe(map((r) => r.data.user.status));
   }

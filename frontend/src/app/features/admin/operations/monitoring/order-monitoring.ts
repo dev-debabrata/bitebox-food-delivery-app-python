@@ -1,5 +1,6 @@
-import { TableLabels } from '../../../../shared/list/table-labels';
-import { BbDialog } from '../../../../shared/dialog/bb-dialog';
+import { TableLabels } from '../../../../shared/directives/table-labels';
+import { AuthService } from '../../../../core/auth/auth.service';
+import { Router } from '@angular/router';
 import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
@@ -7,15 +8,15 @@ import { form } from '@angular/forms/signals';
 import { IconComponent, SelectOption, TabsComponent, ToggleComponent } from 'nexprime';
 import { catchError, map, of } from 'rxjs';
 import { OperationsService } from '../../../../core/services/admin/operations.service';
-import { errorMessage } from '../../../../core/services/api-error';
+import { errorMessage } from '../../../../shared/utils/api-error';
 import { liveRefresh } from '../../../../core/services/poll';
 import { EmptyState } from '../../../../shared/components/empty-state/empty-state';
 import { PageHeader } from '../../../../shared/components/page-header/page-header';
+import { DataTable, TableColumn } from '../../../../shared/components/data-table/data-table';
 import { NP_FORM_FIELDS } from '../../../../shared/forms/np-form-fields';
-import { Monitoring, RestaurantAvailability } from '../../../../shared/models/admin-roles.models';
-import { ORDER_STATUS_LABEL, OrderStatus } from '../../../../shared/models/checkout.models';
+import { Monitoring, RestaurantAvailability } from '../../../../core/models/admin-roles.models';
+import { ORDER_STATUS_LABEL, OrderStatus } from '../../../../core/models/checkout.models';
 import { InrPipe } from '../../../../shared/pipes/money.pipes';
-import { openAdminOrder } from '../../orders/admin-order-dialog/admin-order-dialog';
 
 type Loaded<T> = { data: T; error: null } | { data: null; error: string };
 const loaded = <T>(data: T): Loaded<T> => ({ data, error: null });
@@ -37,6 +38,7 @@ const failed = <T>(err: unknown, text: string): Loaded<T> => ({
     EmptyState,
     PageHeader,
     InrPipe,
+    DataTable,
   ],
   templateUrl: './order-monitoring.html',
   styleUrl: './order-monitoring.scss',
@@ -44,7 +46,8 @@ const failed = <T>(err: unknown, text: string): Loaded<T> => ({
 })
 export class OrderMonitoring {
   private readonly api = inject(OperationsService);
-  private readonly dialog = inject(BbDialog);
+  protected readonly auth = inject(AuthService);
+  private readonly router = inject(Router);
   protected readonly statusLabel = ORDER_STATUS_LABEL;
 
   /** Re-read on every order event, with a 20 s fallback poll while the tab is visible. */
@@ -117,9 +120,24 @@ export class OrderMonitoring {
     },
     { id: 'restaurants', label: 'Restaurant availability', content: '' },
   ]);
+  protected readonly restaurantColumns: TableColumn<RestaurantAvailability>[] = [
+    { label: 'Restaurant', value: (r) => r.name, strong: true, sub: (r) => r.city },
+    { label: 'Hours', value: (r) => r.hours },
+    {
+      label: 'Now',
+      badge: (r) =>
+        !r.isAcceptingOrders
+          ? { label: 'Paused', tone: 'warn' }
+          : r.isOpenNow
+            ? { label: 'Open', tone: 'good' }
+            : { label: 'Closed' },
+    },
+    { label: 'Live orders', value: (r) => r.activeOrders, align: 'end' },
+  ];
   protected readonly updatedAt = computed(() => this.board()?.data?.at ?? null);
 
+  /** Rows open the order for admins who can see orders. */
   protected open(orderId: string): void {
-    openAdminOrder(this.dialog, orderId).subscribe();
+    if (this.auth.can('orders:view')) void this.router.navigate(['/admin/orders', orderId]);
   }
 }

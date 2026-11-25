@@ -4,12 +4,14 @@ import { Observable, map } from 'rxjs';
 import { environment } from '../../../../environments/environment';
 import {
   DeliveryPerformance,
+  DispatchSettings,
+  DistanceSettings,
   Monitoring,
   OperationsDashboard,
   RestaurantAvailability,
-} from '../../../shared/models/admin-roles.models';
-import { ApiResponse } from '../../../shared/models/api.models';
-import { toParams } from '../http-params';
+} from '../../models/admin-roles.models';
+import { ApiResponse } from '../../models/api.models';
+import { toParams } from '../../../shared/utils/http-params';
 
 @Injectable({ providedIn: 'root' })
 export class OperationsService {
@@ -27,4 +29,15 @@ export class OperationsService {
   restaurants = () =>
     this.get<{ items: RestaurantAvailability[] }>('restaurants').pipe(map((d) => d.items));
   performance = (days: number) => this.get<DeliveryPerformance>('performance', { days });
+
+  /** Dispatch rules (riders:manage). */
+  private readonly dispatchUrl = `${environment.baseUrl}/admin/dispatch/settings`;
+  dispatchSettings = () =>
+    this.http
+      .get<ApiResponse<{ settings: DispatchSettings }>>(this.dispatchUrl)
+      .pipe(map((r) => r.data.settings));
+  saveDispatchSettings = (changes: Partial<DistanceSettings>) =>
+    this.http
+      .put<ApiResponse<{ settings: DispatchSettings }>>(this.dispatchUrl, changes)
+      .pipe(map((r) => r.data.settings));
 }

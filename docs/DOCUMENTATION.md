@@ -45,7 +45,7 @@ BiteBox connects four groups of people, and each one has its own panel in one we
 
 How an order works, end to end:
 
-1. The customer picks a delivery point. The site lists approved restaurants within 15 km.
+1. The customer picks a delivery point. The site lists approved restaurants within the delivery range (15 km by default; admins change it at **Operations → Dispatch settings**).
 2. They build a cart. The server prices everything: items, coupon, coins, delivery fee, platform fee and GST.
 3. They place the order with **cash on delivery** or **online payment** (Razorpay, or a simulated test payment in development).
 4. The restaurant accepts it, prepares it and marks it ready. If it does not answer within 10 minutes, the order is rejected automatically.
@@ -304,7 +304,7 @@ request → helmet / cors / compression → json (100 kB) → cookie-parser → 
 | `payment.service#reconcile` | 5 min | Payments the browser and webhooks missed, refunds never sent or not yet confirmed |
 | `notification.service#retryDue` | 1 min | Notification deliveries whose retry time has come, and queued ones nobody picked up |
 
-The Django API runs the same work as Celery Beat tasks (`config/celery.py`): `dispatch.sweep` (15 s), `payments.reconcile` (5 min), `notifications.retry` (1 min), `notifications.purge` and `tracking.purge` (daily). MongoDB removes old notifications, deliveries and tracking points itself (TTL indexes).
+The Django API runs the same work as Celery Beat tasks (`config/celery.py`): `dispatch.sweep` (15 s), `payments.reconcile` (5 min), `notifications.retry` (1 min), `notifications.purge` and `tracking.purge` (daily). Where Beat isn't running (local `runserver`, Vercel), `apps/dispatch/middleware.py` runs `dispatch.sweep` from API traffic, at most every 15 s per process, so offers still expire and the order timeouts still apply (`DISPATCH_SWEEP_ON_REQUESTS`, on by default, off in tests). MongoDB removes old notifications, deliveries and tracking points itself (TTL indexes).
 
 All are idempotent and safe to run on several API instances at once. Tests call `sweep(now)` and `rewardsSweep(now)` directly.
 
@@ -334,6 +334,8 @@ All are idempotent and safe to run on several API instances at once. Tests call 
 
 ### Core services (`core/`)
 
+API data types (`Order`, `User`, `Restaurant`, …) live in `core/models/*.models.ts`, next to the services that load them.
+
 | Service | Role |
 |---|---|
 | `auth/auth.service` | Restores the session at startup via `/auth/refresh`. Holds the access token in memory and exposes `user`, `initialised` and `displayUser`. `displayUser` is a display-only hint and is never used for access decisions. |
@@ -352,15 +354,16 @@ All are idempotent and safe to run on several API instances at once. Tests call 
 | `cart.service`, `cart-actions.service`, `checkout-api.service`, `catalog.service`, `review.service`, `rewards.service`, `support.service`, `upload.service`, `newsletter.service`, `my-restaurant.service`, `order-management.service`, `reports.service` | API wrappers |
 | `admin/*` | Admin API wrappers: catalogue, users, staff, finance, operations, rewards, push |
 | `connection-status`, `app-update`, `install-prompt`, `push-notification` | PWA (see §13) |
-| `browser-storage`, `safe-url`, `idempotency`, `http-params`, `api-error`, `current-url` | Small shared helpers |
 
 ### Shared UI (`shared/`)
 
 - **Components:** maps (`map-picker`, `tracking-map` with `deliveryTracking(order)`), `daily-chart` (chart with a "Show as table" view), `stat-tile`, `notification-bell`, `confirm-dialog` (`confirmed(dialog, data)`), reviews (`review-card`, `review-form-dialog`, `public-reviews`, `rating-summary`, `stars`, `review-reply`, `report-review-dialog`), uploads (`image-upload`, `photo-upload`, `photo-viewer`), `phone-input`, `place-search`, `location-picker`, `address-form-dialog`, `bill-summary`, `qty-stepper`, `order-status-chip`, `restaurant-card`, `veg-badge`, `page-header`, `empty-state`, `site-footer`, `brand-logo`, `mock-payment-dialog`, and PWA (`app-status`, `install-banner`, `push-settings`).
 - **Forms:** Signal Forms (`@angular/forms/signals`):
   - Build forms with `form(model, schema, { submission: { action } })`, `<form [formRoot]>` and `[formField]`.
-  - Shared rules are in `shared/forms/form-rules.ts`. `shownError()` shows an error once the field is touched, and `serverErrors()` maps API 422 errors onto fields.
+  - Shared rules are in `shared/validators/form-rules.ts`. `shownError()` shows an error once the field is touched, and `serverErrors()` maps API 422 errors onto fields.
   - `NP_FORM_FIELDS` bundles the NexPrime inputs and helpers.
+- **Folders by kind:** `shared/directives/` (`ImageFallback`, `TableLabels`, the NexPrime field directives), `shared/pipes/` (money, clock time, item count, `npIcon`), `shared/validators/` (Signal Forms rules: `form-rules.ts`, `code-rules.ts`) and `shared/utils/`.
+- **Utilities (`shared/utils/`):** small helpers used across the app: `api-error` (API error messages and field errors), `http-params`, `browser-storage`, `safe-url`, `idempotency`, `current-url`, `media-query`, `platform-detector`, `countdown`, `end-aligned-menu`, `dates` (`isoDay`, `fromIsoDay`, `birthDateRange`) and `time-of-day` (`timeToDate`, `dateToTime`).
 - **Lists:** `shared/list/paged-list.ts#pagedList(fetch, opts)` handles paging, filters, loading and errors, and live refresh.
 - **List filters:** searchable lists use `shared/list/filtered-list.ts#filteredList(fetch, opts)` with `<bb-list-toolbar>`:
   - The toolbar has the search box, a **Filters** button and an optional sort select, all on the right. Applied filters show as removable chips below.
@@ -425,7 +428,7 @@ The super admin has every permission. The API checks permissions with `can(PERMI
 | `rewards:view` | Rewards reports and lists | | | |
 | `promotions:send` | Push offers to opted-in customers | | | |
 
-To add a permission, add it in `config/permissions.js` and to the frontend `Permission` type (`shared/models/user.models.ts`). Use `can(...)` on the route rather than checking roles. Admin routes that change data also get `audited(action, resourceType, describe)`, which writes the audit log after a successful response.
+To add a permission, add it in `config/permissions.js` and to the frontend `Permission` type (`core/models/user.models.ts`). Use `can(...)` on the route rather than checking roles. Admin routes that change data also get `audited(action, resourceType, describe)`, which writes the audit log after a successful response.
 
 **Admin management rules:**
 - Super admins cannot be created or edited through the API.
@@ -492,7 +495,7 @@ Rating summaries (`rating-summary.schema.js`: `average`, `count`, `distribution[
 - **Resubmission:** after "documents needed" (or a rejection) the owner fixes things on the Verification page and sends it back with `POST /my/restaurant/resubmit`. Editing a rejected restaurant also resubmits it.
 - **Verification (KYC):** a restaurant is approved only when it has an FSSAI number, its required documents are approved (FSSAI licence, PAN, cancelled cheque, and the GST certificate when GST-registered) and a bank account is added (`RESTAURANT_KYC_REQUIRED`). Documents are PDF, JPEG, PNG or WebP up to 5 MB, kept in private storage (`PRIVATE_UPLOAD_DIR`, never served by URL): only the owner and admins who review that partner type can open them, and every admin view is audited. Document and bank account numbers are encrypted (AES-256-GCM, `FIELD_ENCRYPTION_KEY`); only the last 4 digits are shown. Riders use the same documents and bank account endpoints.
 - **Rider verification:** a new rider starts `pending` and cannot go online (403 `RIDER_NOT_VERIFIED`) until an admin approves them (`RIDER_KYC_REQUIRED`). Approval needs approved documents (driving licence, vehicle registration, identity proof), a bank account and a home address (`PATCH /delivery/me/details`); otherwise it fails with 409 listing what is missing. Transitions: pending → approved, rejected or `resubmission_requested`; resubmission_requested → approved or rejected; rejected → approved; approved → resubmission_requested (takes the rider offline). Rejecting or asking for documents needs a reason, which the rider is notified about; they send it back with `POST /delivery/me/resubmit`. Riders who existed before verification was added count as approved.
-- **Hours:** one daily slot, or weekly hours (`weeklyHours`, per day; a slot may run past midnight). Up to 8 gallery photos; the FSSAI number is shown to customers.
+- **Hours:** one daily slot, or weekly hours (`weeklyHours`, per day; a slot may run past midnight). Any number of gallery photos (2 MB each; the restaurant list leaves them out, its page shows them all); the FSSAI number is shown to customers.
 - **Concurrent changes:** status changes are conditional updates, so two admins acting at once cannot both succeed.
 - **Pausing:** partners can pause orders (`accepting-orders`).
 - **Menu:** partners can mark dishes unavailable. Deleting a dish is a soft delete.
@@ -508,7 +511,7 @@ The server prices everything; the browser never sends prices. Rules are in `conf
 | Coupon | Percentage (optionally capped) or a flat amount, never more than the item total |
 | Coins | 100 coins = ₹10, within the redemption limits (§10.9) |
 | Delivery fee | ₹25 for the first 2 km, then ₹8 per extra km (rounded up), capped at ₹99. Free when the item total after the coupon is ₹499 or more. |
-| Delivery range | Up to 15 km, straight line |
+| Delivery range | Up to 15 km by default, straight line. Admins set it (1–50 km) at **Operations → Dispatch settings** (`DispatchSettings.max_delivery_distance_km`, read by `apps/dispatch/tunables.py#max_delivery_km`); it limits both the restaurant list and checkout (`OUT_OF_RANGE`). |
 | Platform fee | ₹5 |
 | GST | 5% of the item total after the coupon |
 
@@ -561,7 +564,7 @@ The cart page lists anything that blocks checkout: unavailable dishes, a closed 
 
 When an order is ready, the backend offers it to **one** rider at a time (`dispatch.service.js`, tunables in `config/dispatch.js`):
 
-1. **Eligible riders:** online, active account, not carrying or being offered another order, location reported within 15 minutes, within 10 km of the restaurant (straight line), and has not declined this order.
+1. **Eligible riders:** online, active account, not carrying or being offered another order, location reported within 15 minutes, within the **pickup distance** of the restaurant (straight line; 10 km by default, set by admins at **Operations → Dispatch settings**, 1–50 km, stored in `DispatchSettings` and read by `apps/dispatch/tunables.py#max_pickup_km`), and has not declined this order. A new distance applies to orders offered from then on.
 2. **Ranking:** nearest first in 500 m bands. Within a band, the rider assigned least recently goes first.
 3. **Offer:** the rider has 90 seconds. Declining passes the order on at once. Ignoring the offer also passes it on, and sets that rider offline.
 
@@ -578,7 +581,7 @@ A rider is offered at most one order and carries at most one. Both are guarded b
 - **Rider GPS:** shared about every 4 s while moving on a delivery, and at least every 15 s. When idle, about once a minute.
 - **Customer map:** shows "Arriving in about N min · X km by road", plus "last update … ago" when the position is older than 90 s.
 - **Trail:** while a rider carries an order (assigned → on the way), their position is stored as a tracking point at most every `TRACKING_SAMPLE_SECONDS` (15 s), never while they are just online. Points are deleted after `TRACKING_RETENTION_DAYS` (30; a TTL index in MongoDB, the `tracking.purge` Celery task in Django). The customer and admin maps draw the trail under the route.
-- **Restoring the map:** `GET /tracking/orders/{id}` (the order's customer, its rider, or `orders:view`) returns `{ tracking, lastPoint, ageSeconds, stale, recentPath }`. The map loads it when it opens and after every socket reconnect, so it shows the rider even if the socket is down.
+- **Restoring the map:** `GET /tracking/orders/{id}` (the order's customer, its rider, its restaurant, or `orders:view`) returns `{ tracking, lastPoint, ageSeconds, stale, recentPath }` (no customer address). The map loads it when it opens and after every socket reconnect, and polls it every 10 s while the socket is down. Restaurants follow their riders from the order card (**Track rider**), seeing the rider's first name and the customer's name and area only.
 - **Arrival check:** marking "arrived at restaurant" stores the straight-line distance from the rider's last fix (`arrivalDistanceMeters`, admins only). Arrivals further than `ARRIVAL_FAR_METERS` (200 m) are allowed but flagged in the admin order view.
 - **Navigation:** the rider app opens directions in the phone's map app (an external link); BiteBox never promises a delivery time from distance alone.
 - **Explained problems:** the app tells the user about these instead of failing silently:
@@ -611,7 +614,8 @@ Other cases:
 - **Refund records:** each refund is a `Refund` document (`pending → processing → processed | failed`; cash refunds `manual_pending → manual_done`). Opening one reserves its amount on `payment.refundedPaise`, so two refunds can never return more than was paid. Finance can refund any amount up to what is left (`POST /admin/payments/{id}/refunds`, with an optional `Idempotency-Key`); the payment becomes `partially_refunded` or `refunded`. Cash refunds are paid by hand and marked with `POST /admin/refunds/{id}/paid`.
 - **Refund status:** Razorpay `refund.processed` / `refund.failed` webhooks settle refunds the bank confirms later.
 - **Reconciliation:** every 5 minutes the API checks unpaid online payments the gateway reports as captured, refunds whose gateway call never finished, and refunds still waiting for the bank.
-- **History:** customers see their payments and refunds at `GET /payments/mine` (the account menu's **Payments** page).
+- **History:** `GET /payments/mine` lists a customer's payments and refunds (the app shows them on each order's page).
+- **Saved cards:** the account menu's **Payment methods** page (`GET /payments/cards`, `DELETE /payments/cards/{id}`). The gateway saves (tokenises) a card when the customer agrees at checkout; BiteBox stores only the token reference, network, last 4 digits, issuer and expiry (`SavedCard`), never the card number or CVV. With Razorpay, checkout gets the customer's Razorpay customer id (`PaymentCustomer`, created once; `checkout.customerId`), Razorpay offers "save card" and shows saved cards, and the page mirrors the customer's card tokens there (removing one deletes the token at Razorpay). Razorpay's saved-cards feature must be enabled on the account. The simulated gateway has a "Save this card" box and lists saved test cards (`checkout.savedCards`).
 
 ### 10.7 Earnings, settlement, payouts and reports
 
@@ -882,7 +886,8 @@ The service worker only runs in **production builds** (`npm run build`, then `np
 
 | Method | Path | Access | Purpose |
 |---|---|---|---|
-| GET | `/restaurants` | public | Approved restaurants (search, cuisine, category, veg, sort, `lat`/`lng`/`radiusKm`, paging) |
+| GET | `/restaurants` | public | Approved restaurants (search, cuisine, category, veg, sort, `lat`/`lng`/`radiusKm` (at most the admin's delivery range), paging) |
+| GET | `/delivery-range` | public | `maxDeliveryDistanceKm`: the admin's delivery range, drawn as a dashed circle on location maps (address picker, restaurant address, live tracking) |
 | GET | `/restaurants/cuisines` | public | Cuisines on offer |
 | GET | `/restaurants/{slugOrId}` | public | Restaurant details |
 | GET | `/restaurants/{slugOrId}/menu` | public | Menu grouped by category |
@@ -890,6 +895,7 @@ The service worker only runs in **production builds** (`npm run build`, then `np
 | GET | `/foods`, `/foods/{id}` | public | Dish search / dish details |
 | GET, POST, PATCH | `/my/restaurant` | restaurant | Own restaurant (create: pending; editing a rejected one resubmits it) |
 | PATCH | `/my/restaurant/accepting-orders` | restaurant | Pause or resume orders |
+| GET | `/my/restaurant/nearby-riders` | restaurant | Free riders within the pickup distance: `radiusKm`, `count`, and up to 50 positions rounded to ~100 m (no names), nearest first. Shown from a waiting order's "See nearby riders" map |
 | GET, POST | `/my/restaurant/foods` | restaurant | Menu items |
 | PATCH, DELETE | `/my/restaurant/foods/{id}` | restaurant | Edit / soft delete |
 | PATCH | `/my/restaurant/foods/{id}/availability` | restaurant | Available or not |
@@ -1000,6 +1006,7 @@ Customer screens: `/offers` (signed-in customers, filter by kind), the offer rib
 | GET | `/admin/dashboard` | any admin role | Platform figures (money with `finance:view`) |
 | GET | `/admin/users/{id}/logins`, `/admin/admins/{id}/logins` | `users:manage` / `admins:manage` | Sign-in history |
 | GET | `/admin/delivery-partners` | `riders:manage` | Riders with availability (`verification` filter) |
+| GET, PUT | `/admin/dispatch/settings` | `riders:manage` | The rider pickup distance (`maxPickupDistanceKm`) and the customer delivery range (`maxDeliveryDistanceKm`), 1–50 km each; PUT takes either or both and is audited as `dispatch.configure` |
 | GET | `/admin/delivery-partners/{id}` | `riders:manage` | Rider details, profile and verification |
 | PATCH | `/admin/delivery-partners/{id}/verification` | `riders:manage`, audited | `status` approved, rejected or resubmission_requested, with `reason` |
 | PATCH | `/admin/delivery-partners/{id}/status` | `riders:manage` | Suspend or reactivate (not while carrying an order) |
@@ -1016,6 +1023,8 @@ Customer screens: `/offers` (signed-in customers, filter by kind), the offer rib
 |---|---|---|---|
 | GET | `/payments/methods` | public | Methods offered at checkout |
 | GET | `/payments/mine` | customer | My payments and refunds |
+| GET | `/payments/cards` | customer | My saved cards |
+| DELETE | `/payments/cards/{id}` | customer | Remove a saved card |
 | POST | `/payments/orders/{orderId}/start` | customer | Create or reuse the gateway order |
 | POST | `/payments/orders/{orderId}/confirm` | customer | Confirm Razorpay (signature and amount verified) |
 | POST | `/payments/orders/{orderId}/abandon` | customer | Cancel the unpaid order, restore the cart |
@@ -1185,6 +1194,7 @@ Not filtered (not paginated lists): dashboards and overviews, commission, financ
 | `/admin/promotions` | `promotions:send` | Push promotions |
 | `/admin/rewards`, `/settings`, `/campaigns`, `/referrals`, `/transactions`, `/history` | `rewards:view` | Coins and rewards |
 | `/admin/operations`, `/monitoring`, `/reports` | `operations:view` | Operations dashboard, live monitoring, delivery performance |
+| `/admin/operations/dispatch` | `riders:manage` | Dispatch settings: how far riders may be from the restaurant to get its orders, and how far customers may be to see and order from it |
 | `/admin/orders` | `orders:view` | Orders |
 | `/admin/restaurants`, `/restaurants/:id`, `/admin/foods` | `restaurants:manage` | Restaurants, approval review, food items |
 | `/admin/delivery-partners`, `/delivery-partners/:id` | `riders:manage` | Riders, verification review |

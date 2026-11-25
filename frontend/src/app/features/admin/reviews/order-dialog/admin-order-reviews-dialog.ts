@@ -1,9 +1,10 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { AuthService } from '../../../../core/auth/auth.service';
 import { MAT_DIALOG_DATA, MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
 import { IconComponent } from 'nexprime';
 import { Observable, filter } from 'rxjs';
-import { errorMessage } from '../../../../core/services/api-error';
+import { errorMessage } from '../../../../shared/utils/api-error';
 import { NotificationService } from '../../../../core/services/notification.service';
 import { ReviewService } from '../../../../core/services/review.service';
 import { confirmed } from '../../../../shared/components/confirm-dialog/confirm-dialog';
@@ -17,8 +18,8 @@ import {
   REVIEW_LIMITS,
   STATUS_LABEL,
   subjectLabel,
-} from '../../../../shared/models/review.models';
-import { openAdminOrder } from '../../orders/admin-order-dialog/admin-order-dialog';
+} from '../../../../core/models/review.models';
+import { Router } from '@angular/router';
 import { openReviewHistory } from '../admin-review-dialog/admin-review-dialog';
 import { BbDialog } from '../../../../shared/dialog/bb-dialog';
 
@@ -51,8 +52,10 @@ const card = (r: AdminReviewDetail): ReviewCardData => ({
 })
 export class AdminOrderReviewsDialog {
   private readonly orderId = inject<string>(MAT_DIALOG_DATA);
+  protected readonly auth = inject(AuthService);
   private readonly reviews = inject(ReviewService);
   private readonly dialog = inject(MatDialog);
+  private readonly router = inject(Router);
   private readonly bbDialog = inject(BbDialog);
   private readonly notify = inject(NotificationService);
 
@@ -130,7 +133,8 @@ export class AdminOrderReviewsDialog {
   }
 
   protected openOrder(): void {
-    openAdminOrder(this.bbDialog, this.orderId).subscribe();
+    this.dialog.closeAll();
+    void this.router.navigate(['/admin/orders', this.orderId]);
   }
 
   /** The API answers with the moderated review; swap it in instead of reloading the order. */

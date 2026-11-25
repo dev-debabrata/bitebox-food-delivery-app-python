@@ -1,0 +1,200 @@
+@use 'breakpoints' as bp;
+
+.layout {
+  display: grid;
+  gap: var(--bb-space-4);
+  grid-template-columns: minmax(0, 1fr);
+
+  @include bp.desktop-up {
+    grid-template-columns: 320px minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+// The profile card: a brand banner, the round photo over it, then who and what.
+.summary {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: hidden;
+  padding-top: 0;
+  text-align: center;
+
+  // Stays in view while the forms scroll, just below the sticky header (72px on desktop).
+  @include bp.desktop-up {
+    position: sticky;
+    top: calc(72px + env(safe-area-inset-top) + var(--bb-space-4));
+  }
+
+  h2 {
+    margin: var(--bb-space-3) 0 var(--bb-space-2);
+    font-size: 1.3rem;
+  }
+}
+
+.banner {
+  align-self: stretch;
+  height: 96px;
+  margin: 0 calc(-1 * var(--bb-space-5));
+  background:
+    radial-gradient(
+      circle at 85% 20%,
+      color-mix(in srgb, var(--bb-amber) 45%, transparent),
+      transparent 55%
+    ),
+    linear-gradient(
+      135deg,
+      var(--bb-brand),
+      color-mix(in srgb, var(--bb-brand) 70%, var(--bb-amber))
+    );
+}
+
+// Round photo, overlapping the banner, with a white ring.
+.photo {
+  width: 120px;
+  margin-top: -60px;
+  border: 4px solid var(--bb-surface);
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--bb-surface);
+  box-shadow: var(--bb-shadow-sm);
+
+  // NexPrime's own (emulated) upload box outranks plain selectors: round it, so its dashed hover
+  // border follows the circle instead of showing square corners.
+  ::ng-deep np-image-upload .box {
+    border-radius: 50% !important;
+  }
+}
+
+.role-chip {
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--bb-amber-100);
+  color: var(--bb-plum);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: var(--bb-space-3);
+
+  span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--bb-warning-bg);
+    color: var(--bb-warning-ink);
+    font-size: 0.75rem;
+    font-weight: 600;
+    --bb-icon-size: 14px;
+
+    &.ok {
+      background: var(--bb-success-bg);
+      color: var(--bb-success);
+    }
+  }
+}
+
+.facts {
+  display: grid;
+  gap: var(--bb-space-2);
+  width: 100%;
+  margin: var(--bb-space-4) 0 0;
+  padding: var(--bb-space-4) 0 0;
+  border-top: 1px solid var(--bb-border);
+  list-style: none;
+  text-align: left;
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: var(--bb-space-3);
+    padding: 8px 10px;
+    border-radius: var(--bb-radius-sm);
+    background: var(--bb-surface-alt);
+    --bb-icon-size: 18px;
+
+    np-icon {
+      flex: none;
+      color: var(--bb-plum);
+    }
+  }
+
+  span {
+    display: grid;
+    min-width: 0;
+    font-weight: 600;
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
+  }
+
+  small {
+    color: var(--bb-ink-muted);
+    font-size: 0.72rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+}
+
+.forms {
+  display: grid;
+  gap: var(--bb-space-4);
+
+  // A thin line under each card's heading.
+  ::ng-deep .bb-card-head {
+    padding-bottom: var(--bb-space-4);
+    border-bottom: 1px solid var(--bb-border);
+  }
+}
+
+// Form fields: up to three per row (one on phones), each at least 240px wide.
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--bb-space-3) var(--bb-space-4);
+  align-items: start;
+
+  // Change password: one field under another.
+  &.one-column {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--bb-space-2);
+
+  button {
+    width: 100%;
+
+    @include bp.tablet-up {
+      width: auto;
+      min-width: 170px;
+    }
+  }
+}
+
+// Change password: a readable width (fields and button), not stretched across the card.
+.narrow {
+  max-width: 480px;
+}
+
+// A saved date of birth: shown, not editable (support corrects it).
+.locked {
+  display: grid;
+  gap: 2px;
+
+  .label {
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+}

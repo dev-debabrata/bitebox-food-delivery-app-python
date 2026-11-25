@@ -7,7 +7,7 @@ import { inBackground } from '../page-loader';
 import { pollWhileVisible } from '../poll';
 import { AdminOrdersService } from '../order-management.service';
 import { AdminCatalogService } from './admin-catalog.service';
-import { RestaurantStatus } from '../../../shared/models/catalog.models';
+import { RestaurantStatus } from '../../models/catalog.models';
 
 const POLL_MS = 60_000;
 
@@ -36,8 +36,8 @@ export class AdminReviewCounts {
 
   private load(): Observable<void> {
     return forkJoin([
-      whenAllowed(this.auth.can('restaurants:manage'), () => this.catalog.restaurantCounts()),
-      whenAllowed(this.auth.can('riders:manage'), () =>
+      whenAllowed(this.auth.can('restaurants:view'), () => this.catalog.restaurantCounts()),
+      whenAllowed(this.auth.can('riders:view'), () =>
         this.orders.riders({ verification: 'pending', limit: 1 }),
       ),
     ]).pipe(
@@ -54,7 +54,10 @@ export class AdminReviewCounts {
       filter((e) => e instanceof NavigationEnd),
       switchMap(() => inBackground(this.load())),
     );
-    merge(pollWhileVisible(() => this.load(), POLL_MS), navigated)
+    merge(
+      pollWhileVisible(() => this.load(), POLL_MS),
+      navigated,
+    )
       .pipe(takeUntilDestroyed(destroyRef))
       .subscribe();
     return this;

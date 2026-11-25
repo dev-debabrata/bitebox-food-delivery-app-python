@@ -1,0 +1,154 @@
+<section class="bb-container page">
+  <header class="head">
+    <h1>Restaurants</h1>
+    <p class="bb-muted">
+      @if (pagination(); as p) {
+        {{ p.total }} {{ p.total === 1 ? 'place' : 'places' }}
+        @if (coords(); as c) {
+          delivering to {{ c.label }}
+        }
+      } @else {
+        Finding great food near you…
+      }
+    </p>
+  </header>
+
+  <!-- Search and where to deliver -->
+  <!-- Search and delivery location, one bar -->
+  <div class="finder">
+    <np-text-input
+      class="search bb-input-bare"
+      [formField]="filters.search"
+      ariaLabel="Search restaurants"
+      placeholder="Search restaurants, dishes or a place"
+      icon="search"
+      clearable
+    />
+    <span class="divider" aria-hidden="true"></span>
+    <button
+      type="button"
+      class="location"
+      [class.on]="coords()"
+      (click)="chooseLocation()"
+      [attr.aria-label]="coords() ? 'Delivering to ' + coords()!.label + '. Change location' : null"
+    >
+      <span class="pin" aria-hidden="true"
+        ><np-icon class="mat-icon" [name]="coords() ? 'map-pin' : 'locate-fixed'"
+      /></span>
+      <span class="where">
+        <small>{{ coords() ? 'Delivering to' : 'Delivery location' }}</small>
+        <strong>{{
+          coords()?.label ??
+            (deliveryLocation() ? 'Near ' + deliveryLocation()!.label : 'Set location')
+        }}</strong>
+      </span>
+      <np-icon name="chevron-down" class="mat-icon caret" />
+    </button>
+  </div>
+
+  <!-- Filters: the full dialog, and one-tap chips for the common ones -->
+  <div class="chips" role="toolbar" aria-label="Filters">
+    <button type="button" class="chip main" [class.on]="activeFilters()" (click)="showFilters()">
+      <np-icon class="mat-icon" name="sliders-horizontal" />Filters
+      @if (activeFilters(); as n) {
+        <span class="count">{{ n }}</span>
+      }
+    </button>
+    <button type="button" class="chip" (click)="showFilters('sort')">
+      <np-icon class="mat-icon" name="arrow-up-down" />{{ sortLabel()
+      }}<np-icon class="mat-icon" name="chevron-down" />
+    </button>
+    <span class="sep" aria-hidden="true"></span>
+    @for (q of quickChips(); track q.label) {
+      <button
+        type="button"
+        class="chip"
+        [class.on]="q.on"
+        [attr.aria-pressed]="q.on"
+        (click)="quick(q.change)"
+      >
+        <np-icon class="mat-icon" [name]="q.icon" />{{ q.label }}
+      </button>
+    }
+    @for (r of removable(); track r.label) {
+      <button
+        type="button"
+        class="chip on"
+        (click)="quick(r.change)"
+        [attr.aria-label]="'Remove ' + r.label"
+      >
+        {{ r.label }}<np-icon class="mat-icon" name="x" />
+      </button>
+    }
+    @if (hasFilters()) {
+      <button type="button" class="clear" (click)="clearFilters()">
+        <np-icon class="mat-icon" name="x" />Clear all
+      </button>
+    }
+    @if (coords()) {
+      <button type="button" class="clear" (click)="showAll()">
+        <np-icon class="mat-icon" name="globe" />Show all restaurants
+      </button>
+    }
+  </div>
+
+  @if (error()) {
+    <div class="bb-alert error" role="alert">
+      <np-icon name="circle-alert" class="mat-icon" matButtonIcon />
+      <span>{{ error() }} <button class="bb-link-button" (click)="retry()">Retry</button></span>
+    </div>
+  }
+
+  @if (loading()) {
+    <div class="grid" aria-busy="true" aria-label="Loading restaurants">
+      @for (i of [1, 2, 3, 4, 5, 6]; track i) {
+        <div class="skeleton-card">
+          <span class="bb-skeleton media"></span>
+          <span class="bb-skeleton line"></span>
+          <span class="bb-skeleton line short"></span>
+        </div>
+      }
+    </div>
+  } @else if (restaurants().length === 0 && !error()) {
+    <bb-empty-state
+      icon="storefront"
+      title="No restaurants found"
+      [message]="
+        nearby()
+          ? 'No restaurants deliver here yet. Try another location or show all restaurants.'
+          : hasFilters()
+            ? 'Try removing a filter or searching for something else.'
+            : 'Restaurants will appear here once they are approved.'
+      "
+    >
+      @if (nearby()) {
+        <button mat-stroked-button (click)="showAll()">Show all restaurants</button>
+      } @else if (hasFilters()) {
+        <button mat-stroked-button (click)="clearFilters()">Clear filters</button>
+      }
+    </bb-empty-state>
+  } @else {
+    <h2 class="bb-sr-only">Results</h2>
+    <div class="grid">
+      @for (r of restaurants(); track r.id) {
+        <bb-restaurant-card [restaurant]="r" />
+      }
+    </div>
+    @if (canLoadMore()) {
+      <div class="more">
+        <button mat-stroked-button (click)="loadMore()" [disabled]="loadingMore()">
+          {{ loadingMore() ? 'Loading…' : 'Show more restaurants' }}
+        </button>
+      </div>
+    }
+  }
+
+  @if (search()) {
+    <p class="dish-link bb-muted">
+      Looking for a specific dish?
+      <a routerLink="/dishes" [queryParams]="{ search: search() }"
+        >See dishes matching “{{ search() }}”</a
+      >
+    </p>
+  }
+</section>

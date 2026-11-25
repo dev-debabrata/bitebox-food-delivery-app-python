@@ -1,0 +1,63 @@
+@use 'breakpoints' as bp;
+
+:host {
+  display: block;
+}
+
+// Two rules side by side on desktops, the Save row under both.
+.settings {
+  display: grid;
+  gap: var(--bb-space-5);
+  max-width: 960px;
+
+  @include bp.desktop-up {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.rule {
+  display: grid;
+  gap: var(--bb-space-3);
+  align-content: start;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--bb-space-3);
+  --bb-icon-size: 26px;
+
+  np-icon {
+    color: var(--bb-plum);
+  }
+
+  h2,
+  p {
+    margin: 0;
+  }
+}
+
+.bb-field {
+  max-width: 240px;
+}
+
+.note,
+.small {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--bb-space-3);
+  padding-top: var(--bb-space-3);
+  border-top: 1px solid var(--bb-border);
+
+  button[type='submit'] {
+    width: auto;
+  }
+}

@@ -1,17 +1,22 @@
-import { TableLabels } from '../../../shared/list/table-labels';
-import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
-import { RouterLink } from '@angular/router';
-import { IconComponent, PaginationComponent } from 'nexprime';
 import { AdminStaffService } from '../../../core/services/admin/admin-staff.service';
+import {
+  BbCell,
+  BbEmpty,
+  DATE_YEAR_TIME,
+  DataTable,
+  TableColumn,
+} from '../../../shared/components/data-table/data-table';
 import { EmptyState } from '../../../shared/components/empty-state/empty-state';
 import { PageHeader } from '../../../shared/components/page-header/page-header';
 import { ListToolbar } from '../../../shared/components/list-toolbar/list-toolbar';
 import { FilterSection } from '../../../shared/components/filter-panel/filter-panel.models';
 import { filterOptions, filteredList } from '../../../shared/list/filtered-list';
 import { adminRoleSection } from '../filter-sections';
-import { AuditEntry } from '../../../shared/models/admin-roles.models';
-import { AdminRole, ROLE_META } from '../../../shared/models/user.models';
+import { AuditEntry } from '../../../core/models/admin-roles.models';
+import { ROLE_META } from '../../../core/models/user.models';
+import { shortId } from '../account-list';
+import { changeItems, resourceTypeLabel } from './audit-format';
 
 /** Labels for the actions the API records (the `audited(...)` routes of both backends). */
 const ACTIONS: Record<string, string> = {
@@ -77,13 +82,9 @@ const ACCOUNT_TYPES: Record<string, string> = {
   admin: 'Admin',
 };
 
-/** "status: active → suspended · name: Asha → Asha V." (lists and objects shortened). */
-const show = (v: unknown): string =>
-  v == null || v === '' || (Array.isArray(v) && !v.length) ? '—' : Array.isArray(v) ? (v.length > 4 ? `${v.length} items` : v.join(', ')) : typeof v === 'object' ? JSON.stringify(v).slice(0, 60) : String(v);
-export const changeLines = (e: AuditEntry): string[] =>
-  Object.entries(e.changes ?? {}).map(([field, c]) =>
-    c && typeof c === 'object' && 'from' in c ? `${field}: ${show(c.from)} → ${show(c.to)}` : `${field}: ${show(c)}`,
-  );
+/** "Restaurant", "Delivery partner", "KYC document"… */
+const typeLabel = (e: AuditEntry): string =>
+  (e.accountType && ACCOUNT_TYPES[e.accountType]) || resourceTypeLabel(e.resourceType ?? '');
 
 /** Where the changed account lives in the panel, when it has a page there. */
 const accountLink = (e: AuditEntry): string[] | null => {
@@ -102,33 +103,25 @@ const accountLink = (e: AuditEntry): string[] | null => {
  */
 @Component({
   selector: 'bb-audit-log',
-  imports: [
-    ListToolbar,
-    TableLabels,
-    DatePipe,
-    RouterLink,
-    PaginationComponent,
-    IconComponent,
-    EmptyState,
-    PageHeader,
-  ],
+  imports: [ListToolbar, DataTable, BbCell, BbEmpty, EmptyState, PageHeader],
   templateUrl: './audit-log.html',
   styleUrl: './audit-log.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class AuditLogPage {
   private readonly api = inject(AdminStaffService);
-  protected readonly actionLabel = (a: string) => ACTIONS[a] ?? a;
-  protected readonly roleLabel = (r: AdminRole) => ROLE_META[r]?.label ?? r;
-  protected readonly accountLabel = (t?: string) => (t ? ACCOUNT_TYPES[t] ?? t : '');
-  protected readonly changeLines = changeLines;
-  protected readonly accountLink = accountLink;
+  protected readonly changeItems = changeItems;
 
   protected readonly filterSections: FilterSection[] = [
     // The actions that were recorded (the API's counts), by their label.
     { kind: 'options', key: 'action', label: 'Action', labelOf: (a) => ACTIONS[a] ?? a },
     adminRoleSection('Admin role'),
-    { kind: 'options', key: 'accountType', label: 'Account type', options: filterOptions(ACCOUNT_TYPES) },
+    {
+      kind: 'options',
+      key: 'accountType',
+      label: 'Account type',
+      options: filterOptions(ACCOUNT_TYPES),
+    },
     { kind: 'dates', key: 'when', label: 'Date', params: ['from', 'to'] },
   ];
   protected readonly log = filteredList((query) => this.api.auditLog(query), {
@@ -137,4 +130,34 @@ export class AuditLogPage {
     instants: true,
   });
   protected readonly list = this.log.list;
+
+  protected readonly columns: TableColumn<AuditEntry>[] = [
+    { label: 'When', date: (e) => e.createdAt, dateFormat: DATE_YEAR_TIME, nowrap: true },
+    {
+      label: 'Admin',
+      value: (e) => e.admin?.name ?? 'Removed account',
+      strong: true,
+      nowrap: true,
+      sub: (e) => ROLE_META[e.adminRole]?.label ?? e.adminRole,
+    },
+    {
+      label: 'Action',
+      badge: (e) => ({ label: ACTIONS[e.action] ?? e.action, tone: 'info' }),
+      sub: (e) => [e.description, e.reason ? `Reason: ${e.reason}` : null],
+    },
+    // The record's name (linked to its page when it has one), its kind and short id.
+    {
+      label: 'Account',
+      class: 'account',
+      // No name (an old entry about a deleted record): the kind tag and the id say enough.
+      value: (e) => e.resourceLabel || null,
+      strong: true,
+      link: accountLink,
+      badge: (e) =>
+        e.resourceType || e.accountType ? { label: typeLabel(e), tone: 'muted' } : null,
+      sub: (e) => (e.resourceId ? shortId(e.resourceId) : null),
+    },
+    // Each changed field (old → new, or what was added/removed) and the IP address.
+    { label: 'Changes', key: 'changes' },
+  ];
 }

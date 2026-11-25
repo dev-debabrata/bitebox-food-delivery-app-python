@@ -2,7 +2,7 @@ import { DestroyRef, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed, toObservable } from '@angular/core/rxjs-interop';
 import { PageEvent } from '@angular/material/paginator';
 import { EMPTY, Observable, catchError, debounceTime, finalize, skip, tap } from 'rxjs';
-import { errorMessage } from '../../core/services/api-error';
+import { errorMessage } from '../utils/api-error';
 import { liveRefresh } from '../../core/services/poll';
 import { OrderEvent } from '../../core/services/realtime.service';
 
@@ -84,6 +84,9 @@ export function pagedList<T extends { items: readonly unknown[] }>(
     reload: () => load(page),
     /** Drops the current page, e.g. on a tab switch where the old rows belong to another list. */
     clear: () => data.set(null),
+    /** Changes the shown rows in place (an optimistic edit or removal); the next load replaces them. */
+    update: (change: (items: T['items']) => T['items']) =>
+      data.update((d) => d && { ...d, items: change(d.items) }),
     onPage: (event: PageEvent) => {
       limit = event.pageSize;
       load(event.pageIndex + 1);

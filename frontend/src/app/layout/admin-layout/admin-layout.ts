@@ -1,12 +1,8 @@
 import { ChangeDetectionStrategy, Component, Signal, computed, inject } from '@angular/core';
+import { pagePermission } from '../../core/auth/admin-pages';
 import { AuthService } from '../../core/auth/auth.service';
 import { AdminReviewCounts } from '../../core/services/admin/admin-review-counts.service';
-import {
-  AdminRole,
-  MEMBER_VIEW_PERMISSION,
-  Permission,
-  ROLE_META,
-} from '../../shared/models/user.models';
+import { AdminRole, Permission, ROLE_META } from '../../core/models/user.models';
 import { NavItem, PanelShell } from '../panel-shell/panel-shell';
 
 const PROFILE: NavItem[] = [{ label: 'Profile', icon: 'manage_accounts', link: '/admin/profile' }];
@@ -27,6 +23,7 @@ const NAV: Record<AdminRole, NavItem[]> = {
         { label: 'Order monitoring', icon: 'monitor', link: '/admin/operations/monitoring' },
         { label: 'Delivery reports', icon: 'insights', link: '/admin/operations/reports' },
         { label: 'Notification log', icon: 'bell', link: '/admin/operations/notifications' },
+        { label: 'Dispatch settings', icon: 'radius', link: '/admin/operations/dispatch' },
       ],
     },
     {
@@ -95,7 +92,11 @@ const NAV: Record<AdminRole, NavItem[]> = {
       children: [
         { label: 'Customers', icon: 'user', link: '/admin/customers' },
         { label: 'Restaurant accounts', icon: 'storefront', link: '/admin/restaurant-accounts' },
-        { label: 'Delivery partner accounts', icon: 'two_wheeler', link: '/admin/delivery-partner-accounts' },
+        {
+          label: 'Delivery partner accounts',
+          icon: 'two_wheeler',
+          link: '/admin/delivery-partner-accounts',
+        },
         { label: 'Admin & operators', icon: 'user-cog', link: '/admin/admins' },
       ],
     },
@@ -110,6 +111,7 @@ const NAV: Record<AdminRole, NavItem[]> = {
     { label: 'Order monitoring', icon: 'monitor', link: '/admin/operations/monitoring' },
     { label: 'Reports', icon: 'insights', link: '/admin/operations/reports' },
     { label: 'Notification log', icon: 'bell', link: '/admin/operations/notifications' },
+    { label: 'Dispatch settings', icon: 'radius', link: '/admin/operations/dispatch' },
     ...PROFILE,
   ],
   finance_admin: [
@@ -146,36 +148,8 @@ const NAV: Record<AdminRole, NavItem[]> = {
   ],
 };
 
-/** The permission each admin page needs (mirrors admin.routes.ts); the most specific path first. */
-const PAGE_PERMISSION: [string, Permission][] = [
-  ['/admin/finance/payouts', 'payouts:manage'],
-  ['/admin/finance', 'finance:view'],
-  ['/admin/payments', 'finance:view'],
-  ['/admin/reports', 'finance:view'],
-  ['/admin/operations', 'operations:view'],
-  ['/admin/orders', 'orders:view'],
-  ['/admin/customers', 'customers:view'],
-  ['/admin/restaurant-accounts', 'restaurants:view'],
-  ['/admin/restaurants', 'restaurants:manage'],
-  ['/admin/foods', 'restaurants:manage'],
-  ['/admin/delivery-partner-accounts', 'riders:view'],
-  ['/admin/delivery-partners', 'riders:manage'],
-  ['/admin/support', 'support:manage'],
-  ['/admin/reviews', 'reviews:moderate'],
-  ['/admin/rewards', 'rewards:view'],
-  ['/admin/categories', 'catalog:manage'],
-  ['/admin/coupons', 'catalog:manage'],
-  ['/admin/promotions', 'promotions:send'],
-  ['/admin/admins', 'admins:manage'],
-  ['/admin/audit-log', 'audit:view'],
-];
-
-const permissionFor = ({ link, query }: NavItem): Permission | null => {
-  if (link === '/admin') return 'admins:manage';
-  if (link === '/admin/users')
-    return MEMBER_VIEW_PERMISSION[query?.['role'] as keyof typeof MEMBER_VIEW_PERMISSION];
-  return PAGE_PERMISSION.find(([path]) => link?.startsWith(path))?.[1] ?? null;
-};
+const permissionFor = ({ link }: NavItem): Permission | null =>
+  link ? pagePermission(link) : null;
 
 /** The items this person may open; groups left empty are dropped. */
 const allowed = (items: NavItem[], can: (p: Permission) => boolean): NavItem[] =>

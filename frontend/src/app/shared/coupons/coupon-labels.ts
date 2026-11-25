@@ -1,12 +1,17 @@
+import type { TableColumn } from '../components/data-table/data-table.models';
+import { formatCount } from '../utils/numbers';
 import {
+  AdminCoupon,
   CardOffer,
   CartQuote,
   COUPON_KIND_LABEL,
+  COUPON_STATUS_LABEL,
+  COUPON_STATUS_TONE,
   CouponOffer,
   DiscountLine,
   NamedRef,
   PAYMENT_CHANNEL_LABEL,
-} from '../models/checkout.models';
+} from '../../core/models/checkout.models';
 import { formatPaise } from '../pipes/money.pipes';
 
 /** "20% off up to ₹100", "₹50 off" or "Free delivery". */
@@ -27,7 +32,9 @@ export function placeOf(c: CouponOffer): { name: string; slug?: string } {
   const own = c.restaurant && typeof c.restaurant === 'object' ? c.restaurant : null;
   const one = own ?? (c.restaurants?.length === 1 ? c.restaurants[0] : null);
   if (one) return one;
-  return { name: c.restaurants?.length ? `${c.restaurants.length} restaurants` : 'All restaurants' };
+  return {
+    name: c.restaurants?.length ? `${c.restaurants.length} restaurants` : 'All restaurants',
+  };
 }
 
 /** Which dishes it covers: "Desserts", "3 dishes", or null for the whole order. */
@@ -41,6 +48,10 @@ export function scopeLabel(c: CouponOffer): string {
   const what = itemsLabel(c);
   return what ? `${where} · ${what}` : where;
 }
+
+/** "Unlimited uses · 1 per customer" or "100 uses · 2 per customer". */
+export const usesLabel = (c: { usageLimit: number | null; perUserLimit: number }): string =>
+  `${c.usageLimit ? `${c.usageLimit} uses` : 'Unlimited uses'} · ${c.perUserLimit} per customer`;
 
 /** The conditions under the discount: "On ₹299+ · New customers" or "No minimum". */
 export function conditionsLabel(c: CouponOffer): string {
@@ -60,7 +71,10 @@ export function discountParts(c: DiscountFields): { big: string; small: string }
 /** A restaurant card's badge: "20% OFF UPTO ₹100", "₹50 OFF" or "FREE DELIVERY". */
 export function badgeLabel(c: DiscountFields): string {
   const { big, small } = discountParts(c);
-  const cap = c.discountType === 'percent' && c.maxDiscountPaise ? ` UPTO ${formatPaise(c.maxDiscountPaise)}` : '';
+  const cap =
+    c.discountType === 'percent' && c.maxDiscountPaise
+      ? ` UPTO ${formatPaise(c.maxDiscountPaise)}`
+      : '';
   return `${big} ${small}${cap}`;
 }
 
@@ -76,7 +90,8 @@ export function billLabel(d: DiscountLine): string {
 }
 
 /** Offers apply by themselves; only coupons are entered as codes (older records are coupons). */
-export const isAutomatic = (c: Pick<CouponOffer, 'kind'>): boolean => (c.kind ?? 'coupon') !== 'coupon';
+export const isAutomatic = (c: Pick<CouponOffer, 'kind'>): boolean =>
+  (c.kind ?? 'coupon') !== 'coupon';
 
 /** A payment offer's channels: "UPI or Card", or "Any online payment". */
 export function channelsLabel(c: Pick<CouponOffer, 'paymentChannels'>): string {
@@ -95,7 +110,9 @@ export function describe(c: CouponOffer): string {
       : c.discountType === 'percent'
         ? `${c.discountValue}% off`
         : `${formatPaise(c.discountValue)} off`;
-  const min = c.minOrderPaise ? ` on orders above ${formatPaise(c.minOrderPaise)}` : ' on any order';
+  const min = c.minOrderPaise
+    ? ` on orders above ${formatPaise(c.minOrderPaise)}`
+    : ' on any order';
   const items = itemsLabel(c);
   const on = items ? ` (on ${items})` : '';
   const cap =
@@ -117,6 +134,35 @@ export function describe(c: CouponOffer): string {
  */
 export function appliedMessage(quote: CartQuote, code?: string): string {
   const offer = quote.restaurantOffers?.find((o) => o.code === code && o.applied);
-  if (offer) return `${offer.name || 'Restaurant offer'} applied — you save ${formatPaise(offer.savingPaise)}`;
+  if (offer)
+    return `${offer.name || 'Restaurant offer'} applied — you save ${formatPaise(offer.savingPaise)}`;
   return `${quote.coupon?.code} applied — you save ${formatPaise(quote.coupon?.discountPaise ?? 0)}`;
+}
+
+/** An offer by name, as restaurants and reviewers know it: its name, description or discount. */
+export const offerTitle = (c: CouponOffer): string => c.name || c.description || discountLabel(c);
+
+/**
+ * The columns the coupon lists share (admin coupons, the review queue, a restaurant's offers):
+ * Discount, Valid (`valid('Runs')` to rename it), Used and Status (with a rejection's reason).
+ * `range` is `dateText().range`.
+ */
+export function couponColumns(range: (from: string, to: string) => string) {
+  const column = (c: TableColumn<AdminCoupon>) => c;
+  return {
+    discount: column({ label: 'Discount', value: discountLabel, sub: conditionsLabel }),
+    valid: (label = 'Valid') => column({ label, value: (c) => range(c.validFrom, c.validUntil) }),
+    used: column({
+      label: 'Used',
+      align: 'center',
+      value: (c) =>
+        formatCount(c.usedCount) + (c.usageLimit ? ' / ' + formatCount(c.usageLimit) : ''),
+    }),
+    status: column({
+      label: 'Status',
+      align: 'center',
+      badge: (c) => ({ label: COUPON_STATUS_LABEL[c.status], tone: COUPON_STATUS_TONE[c.status] }),
+      sub: (c) => (c.status === 'rejected' ? c.rejectionReason : null),
+    }),
+  };
 }

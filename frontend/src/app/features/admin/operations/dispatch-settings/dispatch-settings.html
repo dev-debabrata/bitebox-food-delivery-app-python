@@ -1,0 +1,50 @@
+<bb-page-header
+  title="Dispatch settings"
+  subtitle="Decide how far delivery partners and customers can be from a restaurant."
+/>
+
+@if (loadError(); as message) {
+  <div class="bb-alert error" role="alert">
+    <np-icon name="circle-alert" class="mat-icon" matButtonIcon /><span>{{ message }}</span>
+  </div>
+} @else if (data(); as d) {
+  <form class="bb-card settings" [formRoot]="form" novalidate>
+    @for (r of rules; track r.key) {
+      <section class="rule" [attr.aria-labelledby]="r.key + '-title'">
+        <header class="head">
+          <np-icon [name]="r.icon" class="mat-icon" matButtonIcon />
+          <div>
+            <h2 class="bb-h3" [id]="r.key + '-title'">{{ r.title }}</h2>
+            <p class="bb-muted">
+              Now <strong>{{ d[r.key] }} km</strong>
+              @if (d[r.key] === d[r.defaultKey]) {
+                (the default)
+              }
+            </p>
+          </div>
+        </header>
+        <div class="bb-field">
+          <np-input-number [formField]="form[r.key]" label="Maximum distance" suffix=" km" />
+          <bb-field-error [field]="form[r.key]" />
+        </div>
+        <p class="bb-muted note">{{ r.note }}</p>
+      </section>
+    }
+
+    <footer class="actions">
+      <p class="bb-muted small">
+        Each between {{ d.minPickupDistanceKm }} and {{ d.maxAllowedPickupDistanceKm }} km, in a
+        straight line. Changes apply from now on.
+        @if (d.updatedAt) {
+          Last changed {{ d.updatedAt | date: 'd MMM y, h:mm a'
+          }}{{ d.updatedBy ? ' by ' + d.updatedBy : '' }}.
+        }
+      </p>
+      <button type="submit" class="bb-btn" [disabled]="form().submitting() || !form().dirty()">
+        {{ form().submitting() ? 'Saving…' : 'Save' }}
+      </button>
+    </footer>
+  </form>
+} @else {
+  <span class="bb-skeleton" style="height: 320px"></span>
+}

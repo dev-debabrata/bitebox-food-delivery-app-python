@@ -29,6 +29,7 @@ from apps.customers.views import SavedAddressInput
 from apps.rbac.roles import (
     ADMIN_ROLE_VALUES,
     ADMIN_ROLES,
+    MEMBER_ROLE_VALUES,
     MEMBER_ROLES,
     ROLE_LABEL,
     Permission,
@@ -58,21 +59,21 @@ from .serializers import (
     CUSTOMER_SORT_VALUES,
     VERIFICATION_VALUES,
     CustomerListQuery,
+    MemberListQuery,
     MemberUpdateInput,
     StaffCreateInput,
     StaffListQuery,
     StaffUpdateInput,
     StatusInput,
-    UserListQuery,
     UserOut,
     user_json,
 )
 
 PAGINATION = pagination("Pagination")
-USER_PAGE = envelope(
-    "UserPage",
+MEMBER_PAGE = envelope(
+    "MemberPage",
     inline_serializer(
-        name="UserPageData", fields={"items": UserOut(many=True), "pagination": PAGINATION}
+        name="MemberPageData", fields={"items": UserOut(many=True), "pagination": PAGINATION}
     ),
 )
 STAFF_PAGE = facets_page(
@@ -81,13 +82,6 @@ STAFF_PAGE = facets_page(
 USER = envelope(
     "AdminUserResponse", inline_serializer(name="AdminUserData", fields={"user": UserOut()})
 )
-LIST_PARAMS = [
-    OpenApiParameter("page", int),
-    OpenApiParameter("limit", int),
-    OpenApiParameter("search", str),
-    OpenApiParameter("role", str),
-    OpenApiParameter("status", str, enum=USER_STATUS_VALUES),
-]
 P = Permission
 ANY_VIEW = [permission_required(P.CUSTOMERS_VIEW, P.RESTAURANTS_VIEW, P.RIDERS_VIEW)]
 ANY_EDIT = [permission_required(P.CUSTOMERS_EDIT, P.RESTAURANTS_EDIT, P.RIDERS_EDIT)]
@@ -96,11 +90,6 @@ ANY_STATUS = [
         P.CUSTOMERS_STATUS, P.RESTAURANTS_STATUS, P.RIDERS_STATUS, P.ACCOUNTS_SUSPEND
     )
 ]
-
-
-def _list_query(request: Request, roles: tuple[Role, ...]) -> tuple[dict[str, Any], Page]:
-    query = validated(UserListQuery, request.query_params, roles=roles)
-    return query, Page.from_query(query)
 
 
 def _audit(request: Request, changes: dict[str, Any], target: User) -> None:
@@ -115,12 +104,16 @@ class MembersView(APIView):
 
     @extend_schema(
         tags=["Admin: users"],
-        parameters=LIST_PARAMS,
-        responses={200: USER_PAGE, **errors(401, 403, 422)},
+        parameters=[
+            *page_params("Name, email, phone, the id or its last 6+ characters"),
+            OpenApiParameter("role", str, enum=MEMBER_ROLE_VALUES),
+            OpenApiParameter("status", str, enum=USER_STATUS_VALUES),
+        ],
+        responses={200: MEMBER_PAGE, **errors(401, 403, 422)},
     )
     def get(self, request: Request) -> Response:
-        query, page = _list_query(request, MEMBER_ROLES)
-        return ok(admin.list_members(current_user(request), query, page))
+        query = validated(MemberListQuery, request.query_params)
+        return ok(admin.list_members(current_user(request), query, Page.from_query(query)))
 
 
 def status_changed(
@@ -425,6 +418,8 @@ PERMISSION_CATALOGUE = envelope(
                     "key": serializers.CharField(),
                     "label": serializers.CharField(),
                     "group": serializers.CharField(),
+                    # Ticked along with it (granting it grants these too).
+                    "requires": serializers.ListField(child=serializers.CharField()),
                 },
                 many=True,
             ),
@@ -546,6 +541,7 @@ AUDIT_ENTRY = inline_serializer(
         "description": serializers.CharField(),
         "resource_type": serializers.CharField(),
         "resource_id": serializers.CharField(),
+        "resource_label": serializers.CharField(),
         "ip": serializers.IPAddressField(allow_null=True),
         "account_type": serializers.CharField(),
         "changes": serializers.DictField(),

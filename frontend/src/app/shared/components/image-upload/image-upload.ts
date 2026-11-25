@@ -11,13 +11,13 @@ import {
 } from '@angular/core';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { ImageUploadComponent } from 'nexprime';
-import { errorMessage } from '../../../core/services/api-error';
+import { errorMessage } from '../../utils/api-error';
 import {
   MAX_IMAGE_BYTES,
   UploadEndpoint,
   UploadService,
 } from '../../../core/services/upload.service';
-import { BrokenImages } from '../../images/broken-images';
+import { BrokenImages } from '../../directives/broken-images';
 
 @Component({
   selector: 'bb-image-upload',
@@ -34,6 +34,8 @@ export class ImageUpload {
   readonly label = input('Upload image');
   readonly aspectRatio = input<string | number>('16 / 9');
   readonly endpoint = input<UploadEndpoint>('images');
+  /** NexPrime's look: `minimal` is a compact "+" tile for small thumbnails (photo galleries). */
+  readonly variant = input<'default' | 'minimal'>('default');
 
   protected readonly maxBytes = MAX_IMAGE_BYTES;
   protected readonly preview = signal('');

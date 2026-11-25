@@ -1,0 +1,23 @@
+<bb-page-header
+  title="Verification"
+  subtitle="Legal details, documents and the bank account BiteBox pays you into."
+/>
+
+@if (restaurant() === null) {
+  <div class="bb-card empty">
+    <p>Create your restaurant first, then come back to verify it.</p>
+    <a routerLink="/restaurant/details" class="bb-btn">Add restaurant details</a>
+  </div>
+} @else if (restaurant(); as r) {
+  <bb-kyc-verification
+    detailsTitle="Legal and tax details"
+    [canResubmit]="canResubmit()"
+    [resubmit]="resubmit"
+    (resubmitted)="restaurant.set($event)"
+  >
+    <bb-status-banner status [restaurant]="r" [showFixLink]="false" />
+    <bb-restaurant-legal-form [restaurant]="r" (saved)="legalSaved($event)" />
+  </bb-kyc-verification>
+} @else {
+  <span class="bb-skeleton" style="height: 240px"></span>
+}

@@ -1,0 +1,171 @@
+@use 'breakpoints' as bp;
+
+// Sub-lines (`.sub`), numbers (`.num`) and the grid itself are the global `.bb-table` rules.
+:host {
+  display: block;
+}
+
+.bb-alert {
+  margin: var(--bb-space-3) var(--bb-space-4);
+}
+
+// Also outside a `.bb-list-card` (`card` false).
+.bb-skeleton.row {
+  display: block;
+  height: 52px;
+  margin: var(--bb-space-3) var(--bb-space-4);
+}
+
+// A cell: an optional avatar beside its lines (value, badges, sub-lines, tag).
+.cell {
+  display: flex;
+  align-items: center;
+  gap: var(--bb-space-3);
+  min-width: 0;
+
+  .num & {
+    justify-content: flex-end;
+  }
+  .center & {
+    justify-content: center;
+  }
+}
+
+th.center,
+td.center {
+  text-align: center;
+}
+
+// A sortable heading: the label, black, and on hover a black arrow showing the order now; a click
+// flips it. A column the user clicked keeps its arrow.
+.sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  --bb-icon-size: 14px;
+
+  np-icon {
+    opacity: 0;
+    transition: opacity 0.15s;
+
+    &.on {
+      opacity: 1;
+    }
+  }
+  &:hover np-icon,
+  &:focus-visible np-icon {
+    opacity: 1;
+  }
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+
+  .num & {
+    align-items: flex-end;
+  }
+  .center & {
+    align-items: center;
+  }
+}
+
+// The value and its badges: part of the stack, or one wrapping row (`inline`).
+.line {
+  display: contents;
+
+  &.inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px var(--bb-space-2);
+  }
+}
+
+.bb-avatar {
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  &.square {
+    border-radius: var(--bb-radius-sm);
+  }
+}
+
+.link,
+.strong {
+  font-weight: 700;
+}
+.link {
+  color: inherit;
+}
+.run {
+  text-align: start;
+}
+
+.tag {
+  font-family: monospace;
+  letter-spacing: 0.04em;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+// Row buttons: small round icon buttons (labels in tooltips), or small labelled ones (`text`),
+// centred under their heading (phones lay them out as the row card's foot instead).
+@include bp.tablet-up {
+  th.actions,
+  td.actions {
+    text-align: center;
+  }
+}
+
+.actions > * + * {
+  margin-left: 6px;
+}
+
+// Row buttons: no border, a soft tinted background (red for danger), barely rounded. Icon buttons
+// are 34px squares with a small icon; labelled ones (e.g. "Reverse") show just their name.
+.act.bb-btn,
+.txt.bb-btn {
+  min-height: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--bb-plum-100);
+  color: var(--bb-plum);
+  box-shadow: none;
+  transition: filter 0.15s;
+
+  &:hover:not(:disabled) {
+    filter: brightness(0.93);
+  }
+  &.bb-btn--danger {
+    background: var(--bb-danger-bg);
+    color: var(--bb-danger);
+  }
+}
+
+.act.bb-btn {
+  --bb-icon-size: 16px;
+  width: 34px; // room around the icon
+  height: 34px;
+  padding: 0;
+}
+
+.txt.bb-btn {
+  height: 34px;
+  padding: 0 var(--bb-space-3);
+  font-weight: 600;
+}

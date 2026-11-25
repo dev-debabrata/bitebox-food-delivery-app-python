@@ -1,0 +1,33 @@
+<bb-page-header title="Offers" subtitle="Your best live offer applies by itself to every eligible order. BiteBox reviews each offer first.">
+  <np-button severity="primary" icon="plus" label="New offer" (clicked)="open()" />
+</bb-page-header>
+
+@if (totals(); as s) {
+  <section class="bb-grid cols-4 tiles" aria-label="Offer totals">
+    <bb-stat-tile icon="ticket-percent" label="Live now" [value]="s.active" [hint]="s.scheduled + ' scheduled'" />
+    <bb-stat-tile icon="hourglass" label="Awaiting approval" [value]="s.pending" [hint]="s.draft + (s.draft === 1 ? ' draft · ' : ' drafts · ') + s.rejected + ' rejected'" />
+    <bb-stat-tile icon="shopping-bag" label="Orders with an offer" [value]="formatCount(s.redemptions)" />
+    <bb-stat-tile icon="receipt-indian-rupee" label="Discount given" [value]="formatPaise(s.discountGivenPaise) || '₹0'" />
+  </section>
+}
+
+<bb-list-toolbar
+  [list]="offers"
+  [sections]="filterSections"
+  searchLabel="Search offers"
+  placeholder="Search by name"
+/>
+
+<bb-data-table [list]="list" [columns]="columns" [actions]="actions" label="Offers">
+  <ng-template bbEmpty>
+    <bb-list-empty
+      [list]="offers"
+      icon="ticket-percent"
+      title="No offers yet"
+      message="Create an offer to bring in more orders."
+      noMatch="No offers match these filters"
+    >
+      <np-button severity="primary" label="Create an offer" (clicked)="open()" />
+    </bb-list-empty>
+  </ng-template>
+</bb-data-table>
